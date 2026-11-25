@@ -1,5 +1,5 @@
 import {useCallback, useEffect, useMemo, useState} from 'react';
-import {Eye, FileText, Plus, Printer, Search, X} from 'lucide-react';
+import {Eye, FileText, Plus, Printer, RotateCcw, Search, Trash2, X} from 'lucide-react';
 import {PrintableDocumentModal} from '../components/PrintableDocumentModal';
 import {apiRequest, ApiError, formatCurrencyPHP} from '../lib/api';
 import type {
@@ -81,6 +81,14 @@ export function TransactionsPage({
   const [detailTxn, setDetailTxn] = useState<TransactionRecord | null>(null);
   const [printingTxn, setPrintingTxn] = useState<TransactionRecord | null>(null);
 
+  // Bulk delete & Undo Deletion state
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [undoState, setUndoState] = useState<{undoId: string; count: number} | null>(null);
+  const [restoring, setRestoring] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
@@ -95,7 +103,9 @@ export function TransactionsPage({
       }
 
       const results = await Promise.all(reqs);
-      setTransactions((results[0] as {transactions: TransactionRecord[]}).transactions);
+      const txns = (results[0] as {transactions: TransactionRecord[]}).transactions;
+      setTransactions(txns);
+      setSelectedIds((prev) => prev.filter((id) => txns.some((t) => t.id === id)));
       setResidents((results[1] as {residents: ResidentRecord[]}).residents);
       const tplList = (results[2] as {templates: DocumentTemplateRecord[]}).templates;
       setTemplates(tplList);
@@ -219,6 +229,74 @@ export function TransactionsPage({
   }
 
   const canCreate = user.role === 'Admin' || user.role === 'Staff';
+  const canDelete = user.role === 'Admin' || user.role === 'Staff';
+
+  const allFilteredSelected =
+    filteredTransactions.length > 0 &&
+    filteredTransactions.every((t) => selectedIds.includes(t.id));
+
+  function toggleSelectAllFiltered() {
+    if (allFilteredSelected) {
+      const filteredSet = new Set(filteredTransactions.map((t) => t.id));
+      setSelectedIds((prev) => prev.filter((id) => !filteredSet.has(id)));
+    } else {
+      const next = new Set(selectedIds);
+      filteredTransactions.forEach((t) => next.add(t.id));
+      setSelectedIds(Array.from(next));
+    }
+  }
+
+  function toggleSelectRow(id: string) {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
+    );
+  }
+
+  async function handleBulkDeleteConfirm() {
+    if (selectedIds.length === 0) return;
+    setBulkDeleting(true);
+    setNotice(null);
+    try {
+      const res = await apiRequest<{deletedCount: number; undoId: string}>(
+        '/api/transactions/bulk-delete',
+        {
+          method: 'POST',
+          token,
+          body: {ids: selectedIds},
+        },
+      );
+      setSelectedIds([]);
+      setConfirmBulkDelete(false);
+      setUndoState({undoId: res.undoId, count: res.deletedCount});
+      await fetchAll();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Unable to delete selected transactions.');
+      setConfirmBulkDelete(false);
+    } finally {
+      setBulkDeleting(false);
+    }
+  }
+
+  async function handleUndoDelete() {
+    if (!undoState) return;
+    setRestoring(true);
+    setError(null);
+    try {
+      const res = await apiRequest<{restoredCount: number}>('/api/transactions/restore', {
+        method: 'POST',
+        token,
+        body: {undoId: undoState.undoId},
+      });
+      setUndoState(null);
+      setNotice(`Restored ${res.restoredCount} deleted transaction(s).`);
+      await fetchAll();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Unable to undo deletion.');
+      setUndoState(null);
+    } finally {
+      setRestoring(false);
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -229,17 +307,68 @@ export function TransactionsPage({
             Create, monitor, generate, and release official Barangay Ocho documents
           </p>
         </div>
-        {canCreate && (
-          <button
-            type="button"
-            onClick={openCreateRequest}
-            className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-blue-800 hover:bg-blue-900 rounded-lg transition-colors whitespace-nowrap shrink-0"
-          >
-            <Plus className="w-4 h-4" />
-            New Document Request
-          </button>
-        )}
+        <div className="flex items-center gap-3 shrink-0">
+          {canDelete && selectedIds.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setConfirmBulkDelete(true)}
+              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-red-700 hover:bg-red-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
+            >
+              <Trash2 className="w-4 h-4" />
+              {allFilteredSelected && selectedIds.length === transactions.length
+                ? `Delete All (${selectedIds.length})`
+                : `Delete Selected (${selectedIds.length})`}
+            </button>
+          )}
+          {canCreate && (
+            <button
+              type="button"
+              onClick={openCreateRequest}
+              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-blue-800 hover:bg-blue-900 rounded-lg transition-colors whitespace-nowrap shrink-0"
+            >
+              <Plus className="w-4 h-4" />
+              New Document Request
+            </button>
+          )}
+        </div>
       </div>
+
+      {undoState && (
+        <div className="p-3.5 rounded-lg bg-slate-900 text-white text-sm flex items-center justify-between gap-4">
+          <span>
+            Deleted <span className="font-semibold font-mono-num">{undoState.count}</span>{' '}
+            transaction(s).
+          </span>
+          <div className="flex items-center gap-3 shrink-0">
+            <button
+              type="button"
+              onClick={handleUndoDelete}
+              disabled={restoring}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-white text-slate-900 hover:bg-slate-100 disabled:opacity-60 rounded-md transition-colors"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              {restoring ? 'Restoring...' : 'Undo Delete'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setUndoState(null)}
+              className="p-1 text-slate-400 hover:text-white"
+              aria-label="Dismiss undo notification"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {notice && (
+        <div className="p-3.5 rounded-lg bg-emerald-50 border border-emerald-200 text-sm text-emerald-800 flex items-center justify-between">
+          <span>{notice}</span>
+          <button type="button" onClick={() => setNotice(null)} className="text-xs underline">
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {error && (
         <div className="p-3.5 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700 flex items-center justify-between">
@@ -310,6 +439,18 @@ export function TransactionsPage({
             <table className="w-full text-left border-collapse text-sm">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50 text-xs text-slate-500">
+                  {canDelete && (
+                    <th className="py-3 pl-4 pr-2 font-medium w-10">
+                      <input
+                        type="checkbox"
+                        checked={allFilteredSelected}
+                        onChange={toggleSelectAllFiltered}
+                        aria-label="Select all transactions"
+                        title="Select all rows"
+                        className="rounded border-slate-300 text-blue-800 focus:ring-blue-800"
+                      />
+                    </th>
+                  )}
                   <th className="py-3 px-4 font-medium">Reference No.</th>
                   <th className="py-3 px-4 font-medium">Resident</th>
                   <th className="py-3 px-4 font-medium">Document Type</th>
@@ -320,8 +461,26 @@ export function TransactionsPage({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {filteredTransactions.map((txn) => (
-                  <tr key={txn.id} className="hover:bg-slate-50/80 transition-colors">
+                {filteredTransactions.map((txn) => {
+                  const isChecked = selectedIds.includes(txn.id);
+                  return (
+                  <tr
+                    key={txn.id}
+                    className={`hover:bg-slate-50/80 transition-colors ${
+                      isChecked ? 'bg-blue-50/40' : ''
+                    }`}
+                  >
+                    {canDelete && (
+                      <td className="py-3 pl-4 pr-2">
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => toggleSelectRow(txn.id)}
+                          aria-label={`Select transaction ${txn.code}`}
+                          className="rounded border-slate-300 text-blue-800 focus:ring-blue-800"
+                        />
+                      </td>
+                    )}
                     <td className="py-3 px-4 font-mono-num text-xs font-semibold text-slate-900 whitespace-nowrap">
                       {txn.code}
                     </td>
@@ -380,7 +539,8 @@ export function TransactionsPage({
                       </div>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -831,6 +991,38 @@ export function TransactionsPage({
                   </button>
                 )}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Delete Confirmation Modal */}
+      {confirmBulkDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
+          <div className="bg-white w-full max-w-md rounded-xl border border-slate-200 shadow-xl p-6 space-y-4">
+            <h3 className="text-base font-bold text-slate-900">Confirm Transaction Deletion</h3>
+            <p className="text-sm text-slate-600">
+              Are you sure you want to delete{' '}
+              <span className="font-semibold text-slate-900">{selectedIds.length}</span> selected
+              transaction(s)? You can undo this immediately after deleting.
+            </p>
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setConfirmBulkDelete(false)}
+                disabled={bulkDeleting}
+                className="px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleBulkDeleteConfirm}
+                disabled={bulkDeleting}
+                className="px-4 py-2 text-sm font-medium text-white bg-red-700 hover:bg-red-800 disabled:opacity-60 rounded-lg"
+              >
+                {bulkDeleting ? 'Deleting...' : `Delete (${selectedIds.length})`}
+              </button>
             </div>
           </div>
         </div>

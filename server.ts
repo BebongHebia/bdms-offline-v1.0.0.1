@@ -38,6 +38,7 @@ import type {
   PaymentMethod,
   ResidentRecord,
   StaffOfficialRecord,
+  TransactionRecord,
   TransactionStatus,
   UserRole,
 } from './src/types/bdms.ts';
@@ -45,6 +46,14 @@ import type {
 interface AuthenticatedRequest extends Request {
   auth?: TokenPayload;
 }
+
+interface DeletedTxnBatch {
+  userId: string;
+  transactions: TransactionRecord[];
+  expiresAt: number;
+}
+
+const deletedTxnBatches = new Map<string, DeletedTxnBatch>();
 
 const SESSION_COOKIE_NAME = 'bdms_session';
 const VALID_ROLES: UserRole[] = ['Admin', 'Staff', 'Treasurer'];
@@ -1151,6 +1160,98 @@ async function createApp() {
     await saveDatabase(db);
     res.json({transaction: updated});
   });
+
+  app.post(
+    '/api/transactions/bulk-delete',
+    requireAuth,
+    requireRole('Admin', 'Staff'),
+    async (req: AuthenticatedRequest, res) => {
+      const ids = Array.isArray(req.body?.ids)
+        ? req.body.ids.filter((id: unknown): id is string => typeof id === 'string')
+        : [];
+
+      if (ids.length === 0) {
+        res.status(400).json({error: 'No transactions selected for deletion.'});
+        return;
+      }
+
+      const db = loadDatabase();
+      const idSet = new Set(ids);
+      const removed = db.transactions.filter((t) => idSet.has(t.id));
+
+      if (removed.length === 0) {
+        res.status(404).json({error: 'No matching transactions found.'});
+        return;
+      }
+
+      db.transactions = db.transactions.filter((t) => !idSet.has(t.id));
+
+      // Prune expired undo batches and store current batch for undo
+      const now = Date.now();
+      for (const [key, batch] of deletedTxnBatches.entries()) {
+        if (batch.expiresAt < now) deletedTxnBatches.delete(key);
+      }
+
+      const undoId = `undo-${now}-${Math.random().toString(36).slice(2, 8)}`;
+      deletedTxnBatches.set(undoId, {
+        userId: req.auth!.userId,
+        transactions: removed,
+        expiresAt: now + 15 * 60 * 1000,
+      });
+
+      appendActivityLog(
+        db,
+        req.auth!.fullName,
+        req.auth!.role,
+        'Transactions Deleted',
+        `Deleted ${removed.length} transaction(s)`,
+      );
+      await saveDatabase(db);
+      res.json({ok: true, deletedCount: removed.length, undoId});
+    },
+  );
+
+  app.post(
+    '/api/transactions/restore',
+    requireAuth,
+    requireRole('Admin', 'Staff'),
+    async (req: AuthenticatedRequest, res) => {
+      const undoId = cleanStr(req.body?.undoId, 80);
+      if (!undoId) {
+        res.status(400).json({error: 'Undo identifier is required.'});
+        return;
+      }
+
+      const batch = deletedTxnBatches.get(undoId);
+      if (!batch || batch.expiresAt < Date.now()) {
+        deletedTxnBatches.delete(undoId);
+        res.status(404).json({error: 'Undo window has expired or was already restored.'});
+        return;
+      }
+
+      if (batch.userId !== req.auth!.userId && req.auth!.role !== 'Admin') {
+        res.status(403).json({error: 'You cannot restore another user’s deleted batch.'});
+        return;
+      }
+
+      const db = loadDatabase();
+      const existingIds = new Set(db.transactions.map((t) => t.id));
+      const toRestore = batch.transactions.filter((t) => !existingIds.has(t.id));
+
+      db.transactions = [...toRestore, ...db.transactions];
+      deletedTxnBatches.delete(undoId);
+
+      appendActivityLog(
+        db,
+        req.auth!.fullName,
+        req.auth!.role,
+        'Transactions Restored',
+        `Undid deletion of ${toRestore.length} transaction(s)`,
+      );
+      await saveDatabase(db);
+      res.json({ok: true, restoredCount: toRestore.length});
+    },
+  );
 
   // ---------------- PAYMENTS ROUTES (Treasurer & Admin) ----------------
 

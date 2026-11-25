@@ -185,6 +185,27 @@
   ],
   "transactions": [
     {
+      "id": "txn-5",
+      "code": "TXN-2026-0005",
+      "residentCode": "RES-2026-0005",
+      "residentName": "Ernesto S. Baguio Jr.",
+      "templateCode": "TPL-BID",
+      "documentType": "Barangay Identification",
+      "category": "Identification",
+      "purpose": "Barangay Resident ID Issuance",
+      "dateCreated": "2026-11-25",
+      "issueDate": "",
+      "signedBy": "Hon. Roberto M. Villareal",
+      "processedBy": "Maricel V. Quinto",
+      "validity": "1 Year",
+      "remarks": "",
+      "isBypass": false,
+      "feeAmount": 75,
+      "paymentStatus": "Unpaid",
+      "status": "Pending",
+      "extraFields": {}
+    },
+    {
       "id": "txn-1",
       "code": "TXN-2026-0001",
       "residentCode": "RES-2026-0006",
@@ -277,27 +298,6 @@
         "isFTJS": true,
         "residencyYears": "12 years"
       }
-    },
-    {
-      "id": "txn-5",
-      "code": "TXN-2026-0005",
-      "residentCode": "RES-2026-0005",
-      "residentName": "Ernesto S. Baguio Jr.",
-      "templateCode": "TPL-BID",
-      "documentType": "Barangay Identification",
-      "category": "Identification",
-      "purpose": "Barangay Resident ID Issuance",
-      "dateCreated": "2026-11-25",
-      "issueDate": "",
-      "signedBy": "Hon. Roberto M. Villareal",
-      "processedBy": "Maricel V. Quinto",
-      "validity": "1 Year",
-      "remarks": "",
-      "isBypass": false,
-      "feeAmount": 75,
-      "paymentStatus": "Unpaid",
-      "status": "Pending",
-      "extraFields": {}
     }
   ],
   "payments": [
@@ -553,6 +553,30 @@
     "contactInfo": "(088) 813-2408 · barangay8.malaybalay@local.gov.ph"
   },
   "activityLogs": [
+    {
+      "id": "log-1795620274714-r3n8",
+      "timestamp": "2026-11-25T15:24:34.714Z",
+      "actor": "Barangay Ocho Administrator",
+      "role": "Admin",
+      "action": "Transactions Restored",
+      "details": "Undid deletion of 1 transaction(s)"
+    },
+    {
+      "id": "log-1795620274552-ed9f",
+      "timestamp": "2026-11-25T15:24:34.552Z",
+      "actor": "Barangay Ocho Administrator",
+      "role": "Admin",
+      "action": "Transactions Deleted",
+      "details": "Deleted 1 transaction(s)"
+    },
+    {
+      "id": "log-1795620274315-96lz",
+      "timestamp": "2026-11-25T15:24:34.315Z",
+      "actor": "Barangay Ocho Administrator",
+      "role": "Admin",
+      "action": "User Login",
+      "details": "Signed in as Admin"
+    },
     {
       "id": "log-1795618826469-nvsr",
       "timestamp": "2026-11-25T15:00:26.469Z",
