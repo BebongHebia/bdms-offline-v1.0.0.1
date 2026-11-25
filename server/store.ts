@@ -7,6 +7,7 @@ import type {
   UserRecord,
   UserRole,
 } from '../src/types/bdms.ts';
+import {initMysqlDatabase, isMysqlConfigured, loadMysqlDatabase, saveMysqlDatabase} from './mysql.ts';
 import {createInitialDatabase, DEFAULT_SETTINGS, DEFAULT_TEMPLATES} from './seed.ts';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -35,21 +36,20 @@ function computeAge(bday: string): number {
 }
 
 let cachedDb: BdmsDatabase | null = null;
+let activeDriver: 'json' | 'mysql' = 'json';
 
-export function loadDatabase(): BdmsDatabase {
-  if (cachedDb) return cachedDb;
+function readJsonFile(): BdmsDatabase {
   ensureDataDir();
-
   if (!fs.existsSync(DB_FILE)) {
     const initial = createInitialDatabase(false);
-    saveDatabase(initial);
+    writeJsonFile(initial);
     return initial;
   }
 
   try {
     const raw = fs.readFileSync(DB_FILE, 'utf8');
     const parsed = JSON.parse(raw) as Partial<BdmsDatabase>;
-    cachedDb = {
+    return {
       users: Array.isArray(parsed.users) ? parsed.users : [],
       residents: Array.isArray(parsed.residents)
         ? parsed.residents.map((r) => ({...r, age: computeAge(r.bday)}))
@@ -64,20 +64,59 @@ export function loadDatabase(): BdmsDatabase {
       settings: parsed.settings ? {...DEFAULT_SETTINGS, ...parsed.settings} : DEFAULT_SETTINGS,
       activityLogs: Array.isArray(parsed.activityLogs) ? parsed.activityLogs : [],
     };
-    return cachedDb;
   } catch {
     const fallback = createInitialDatabase(false);
-    saveDatabase(fallback);
+    writeJsonFile(fallback);
     return fallback;
   }
 }
 
-export function saveDatabase(db: BdmsDatabase): void {
+function writeJsonFile(db: BdmsDatabase): void {
   ensureDataDir();
-  cachedDb = db;
   const tmpFile = `${DB_FILE}.tmp`;
   fs.writeFileSync(tmpFile, JSON.stringify(db, null, 2), 'utf8');
   fs.renameSync(tmpFile, DB_FILE);
+}
+
+export async function initializeDatabase(): Promise<'json' | 'mysql'> {
+  const jsonDb = readJsonFile();
+  if (isMysqlConfigured()) {
+    try {
+      await initMysqlDatabase(jsonDb);
+      cachedDb = await loadMysqlDatabase();
+      activeDriver = 'mysql';
+      console.log('BDMS storage initialized with local MySQL database.');
+      return 'mysql';
+    } catch (err) {
+      console.warn(
+        'MySQL connection unavailable; falling back to local JSON store:',
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+  cachedDb = jsonDb;
+  activeDriver = 'json';
+  console.log('BDMS storage initialized with local JSON database (data/bdms-store.json).');
+  return 'json';
+}
+
+export function getActiveStorageDriver(): 'json' | 'mysql' {
+  return activeDriver;
+}
+
+export function loadDatabase(): BdmsDatabase {
+  if (cachedDb) return cachedDb;
+  cachedDb = readJsonFile();
+  return cachedDb;
+}
+
+export async function saveDatabase(db: BdmsDatabase): Promise<void> {
+  cachedDb = db;
+  if (activeDriver === 'mysql') {
+    await saveMysqlDatabase(db);
+  } else {
+    writeJsonFile(db);
+  }
 }
 
 export function toPublicUser(user: BdmsDatabase['users'][number]): UserRecord {

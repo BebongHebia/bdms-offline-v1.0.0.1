@@ -1,5 +1,14 @@
-import {useCallback, useEffect, useMemo, useState} from 'react';
-import {AlertTriangle, FilePlus2, Plus, Search, Trash2, Users, X} from 'lucide-react';
+import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
+import {
+  AlertTriangle,
+  Camera,
+  FilePlus2,
+  Plus,
+  Search,
+  Trash2,
+  Upload,
+  X,
+} from 'lucide-react';
 import {apiRequest, ApiError, formatLongDate} from '../lib/api';
 import type {ResidentRecord, TransactionRecord, UserRecord} from '../types/bdms';
 
@@ -32,6 +41,77 @@ function computePreviewAge(bday: string): number {
   return Math.max(0, age);
 }
 
+function getInitials(r: Pick<ResidentRecord, 'firstName' | 'lastName'>): string {
+  const f = r.firstName?.trim().charAt(0) || '';
+  const l = r.lastName?.trim().charAt(0) || '';
+  return `${f}${l}`.toUpperCase() || 'R';
+}
+
+function ResidentAvatar({
+  resident,
+  size = 'sm',
+}: {
+  resident: Pick<ResidentRecord, 'firstName' | 'lastName' | 'photoUrl'>;
+  size?: 'sm' | 'lg';
+}) {
+  const [imgFailed, setImgFailed] = useState(false);
+  const dims = size === 'lg' ? 'w-20 h-20 text-xl' : 'w-9 h-9 text-xs';
+
+  useEffect(() => {
+    setImgFailed(false);
+  }, [resident.photoUrl]);
+
+  if (resident.photoUrl && !imgFailed) {
+    return (
+      <img
+        src={resident.photoUrl}
+        alt={`${resident.firstName} ${resident.lastName}`}
+        referrerPolicy="no-referrer"
+        onError={() => setImgFailed(true)}
+        className={`${dims} rounded-full object-cover border border-slate-200 bg-slate-100 shrink-0`}
+      />
+    );
+  }
+
+  return (
+    <div
+      aria-label={`${resident.firstName} ${resident.lastName} initials`}
+      className={`${dims} rounded-full border border-slate-200 bg-slate-100 text-slate-600 font-semibold flex items-center justify-center shrink-0`}
+    >
+      {getInitials(resident)}
+    </div>
+  );
+}
+
+async function resizeImageFileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Failed to read selected image file.'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Unsupported or corrupted image file.'));
+      img.onload = () => {
+        const maxSide = 480;
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+        const width = Math.max(1, Math.round(img.width * scale));
+        const height = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          reject(new Error('Canvas context unavailable.'));
+          return;
+        }
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', 0.86));
+      };
+      img.src = String(reader.result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 const EMPTY_FORM = {
   firstName: '',
   middleName: '',
@@ -60,19 +140,48 @@ export function ResidentsPage({token, user, onCreateRequestForResident}: Residen
 
   const [search, setSearch] = useState('');
   const [purokFilter, setPurokFilter] = useState('All');
+  const [sexFilter, setSexFilter] = useState<'All' | 'Male' | 'Female'>('All');
+  const [classificationFilter, setClassificationFilter] = useState<
+    'All' | 'Voter' | 'Senior' | 'PWD' | 'Regular'
+  >('All');
 
-  // Duplicate Scanner
-  const [duplicateGroups, setDuplicateGroups] = useState<ResidentRecord[][] | null>(null);
+  // Bulk selection state (Admin)
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   // Add / Edit Modal
   const [modalMode, setModalMode] = useState<'create' | 'edit' | null>(null);
   const [editingResident, setEditingResident] = useState<ResidentRecord | null>(null);
   const [form, setForm] = useState(EMPTY_FORM);
+  const [photoDataUrl, setPhotoDataUrl] = useState<string>('');
+  const [removePhoto, setRemovePhoto] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // Camera Capture state
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
   // Profile Drawer / Modal
   const [viewingResident, setViewingResident] = useState<ResidentRecord | null>(null);
+
+  const stopCamera = useCallback(() => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setCameraOpen(false);
+  }, []);
+
+  useEffect(() => {
+    return () => stopCamera();
+  }, [stopCamera]);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -83,6 +192,7 @@ export function ResidentsPage({token, user, onCreateRequestForResident}: Residen
       ]);
       setResidents(resRes.residents);
       setTransactions(txnRes.transactions);
+      setSelectedIds((prev) => prev.filter((id) => resRes.residents.some((r) => r.id === id)));
       setError(null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Failed to load residents.');
@@ -99,6 +209,18 @@ export function ResidentsPage({token, user, onCreateRequestForResident}: Residen
     const q = search.trim().toLowerCase();
     return residents.filter((r) => {
       if (purokFilter !== 'All' && r.purok !== purokFilter) return false;
+      if (sexFilter !== 'All' && r.sex !== sexFilter) return false;
+      if (classificationFilter !== 'All') {
+        if (classificationFilter === 'Voter' && !r.voterStatus) return false;
+        if (classificationFilter === 'Senior' && !r.seniorCitizenStatus) return false;
+        if (classificationFilter === 'PWD' && !r.pwdStatus) return false;
+        if (
+          classificationFilter === 'Regular' &&
+          (r.voterStatus || r.seniorCitizenStatus || r.pwdStatus)
+        ) {
+          return false;
+        }
+      }
       if (!q) return true;
       const full = `${r.firstName} ${r.middleName} ${r.lastName} ${r.suffix}`.toLowerCase();
       return (
@@ -108,45 +230,62 @@ export function ResidentsPage({token, user, onCreateRequestForResident}: Residen
         r.occupation.toLowerCase().includes(q)
       );
     });
-  }, [residents, search, purokFilter]);
+  }, [residents, search, purokFilter, sexFilter, classificationFilter]);
 
-  // Live duplicate detector while typing in Create mode
+  // Automatic duplicate detection while adding OR editing
   const livePossibleDuplicates = useMemo(() => {
-    if (modalMode !== 'create') return [];
+    if (!modalMode) return [];
     const fn = form.firstName.trim().toLowerCase();
     const ln = form.lastName.trim().toLowerCase();
+    const bday = form.bday.trim();
     if (!fn && !ln) return [];
-    return residents.filter((r) => {
-      const rfn = r.firstName.toLowerCase();
-      const rln = r.lastName.toLowerCase();
-      if (ln && fn) {
-        return rln.includes(ln) && rfn.includes(fn);
-      }
-      if (ln.length >= 3) return rln === ln;
-      return false;
-    });
-  }, [modalMode, form.firstName, form.lastName, residents]);
 
-  async function handleCheckDuplicates() {
-    try {
-      const res = await apiRequest<{duplicateGroups: ResidentRecord[][]}>(
-        '/api/residents/duplicates',
-        {token},
-      );
-      setDuplicateGroups(res.duplicateGroups);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Duplicate scan failed.');
+    return residents.filter((r) => {
+      if (modalMode === 'edit' && editingResident && r.id === editingResident.id) {
+        return false;
+      }
+      const rfn = r.firstName.trim().toLowerCase();
+      const rln = r.lastName.trim().toLowerCase();
+      const nameMatch = Boolean(fn && ln && rfn === fn && rln === ln);
+      const lastAndBdayMatch = Boolean(ln && bday && rln === ln && r.bday === bday);
+      const partialMatch = Boolean(fn.length >= 2 && ln.length >= 2 && rln.includes(ln) && rfn.includes(fn));
+      return nameMatch || lastAndBdayMatch || partialMatch;
+    });
+  }, [modalMode, editingResident, form.firstName, form.lastName, form.bday, residents]);
+
+  const allFilteredSelected =
+    filteredResidents.length > 0 && filteredResidents.every((r) => selectedIds.includes(r.id));
+
+  function toggleSelectAllFiltered() {
+    if (allFilteredSelected) {
+      const filteredSet = new Set(filteredResidents.map((r) => r.id));
+      setSelectedIds((prev) => prev.filter((id) => !filteredSet.has(id)));
+    } else {
+      const next = new Set(selectedIds);
+      filteredResidents.forEach((r) => next.add(r.id));
+      setSelectedIds(Array.from(next));
     }
   }
 
+  function toggleSelectRow(id: string) {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
+    );
+  }
+
   function openCreateModal() {
+    stopCamera();
     setModalMode('create');
     setEditingResident(null);
     setForm(EMPTY_FORM);
+    setPhotoDataUrl('');
+    setRemovePhoto(false);
+    setCameraError(null);
     setFormError(null);
   }
 
   function openEditModal(r: ResidentRecord) {
+    stopCamera();
     setModalMode('edit');
     setEditingResident(r);
     setForm({
@@ -168,7 +307,77 @@ export function ResidentsPage({token, user, onCreateRequestForResident}: Residen
       pwdStatus: r.pwdStatus,
       seniorCitizenStatus: r.seniorCitizenStatus,
     });
+    setPhotoDataUrl('');
+    setRemovePhoto(false);
+    setCameraError(null);
     setFormError(null);
+  }
+
+  function closeModal() {
+    stopCamera();
+    setModalMode(null);
+  }
+
+  async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setCameraError(null);
+    setFormError(null);
+    try {
+      const dataUrl = await resizeImageFileToDataUrl(file);
+      setPhotoDataUrl(dataUrl);
+      setRemovePhoto(false);
+      stopCamera();
+    } catch (err) {
+      setCameraError(err instanceof Error ? err.message : 'Unable to process uploaded image.');
+    } finally {
+      e.target.value = '';
+    }
+  }
+
+  async function startCamera() {
+    setCameraError(null);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setCameraError('Device camera is not supported in this browser.');
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {facingMode: 'user', width: {ideal: 640}, height: {ideal: 480}},
+        audio: false,
+      });
+      streamRef.current = stream;
+      setCameraOpen(true);
+      requestAnimationFrame(() => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play().catch(() => {});
+        }
+      });
+    } catch {
+      setCameraError(
+        'Camera permission was denied or no camera device was found. You can upload a photo file instead.',
+      );
+    }
+  }
+
+  function captureCameraPhoto() {
+    const video = videoRef.current;
+    if (!video) return;
+    const w = video.videoWidth || 480;
+    const h = video.videoHeight || 360;
+    const maxSide = 480;
+    const scale = Math.min(1, maxSide / Math.max(w, h));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(w * scale));
+    canvas.height = Math.max(1, Math.round(h * scale));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.86);
+    setPhotoDataUrl(dataUrl);
+    setRemovePhoto(false);
+    stopCamera();
   }
 
   async function handleSaveResident(e: React.FormEvent) {
@@ -177,14 +386,23 @@ export function ResidentsPage({token, user, onCreateRequestForResident}: Residen
     setSaving(true);
     try {
       if (modalMode === 'create') {
-        await apiRequest('/api/residents', {method: 'POST', token, body: form});
+        await apiRequest('/api/residents', {
+          method: 'POST',
+          token,
+          body: {...form, photoDataUrl: photoDataUrl || undefined},
+        });
       } else if (modalMode === 'edit' && editingResident) {
         await apiRequest(`/api/residents/${editingResident.id}`, {
           method: 'PATCH',
           token,
-          body: form,
+          body: {
+            ...form,
+            photoDataUrl: photoDataUrl || undefined,
+            removePhoto,
+          },
         });
       }
+      stopCamera();
       setModalMode(null);
       await fetchData();
     } catch (err) {
@@ -204,7 +422,30 @@ export function ResidentsPage({token, user, onCreateRequestForResident}: Residen
     }
   }
 
+  async function handleBulkDeleteConfirm() {
+    if (selectedIds.length === 0) return;
+    setBulkDeleting(true);
+    try {
+      await apiRequest('/api/residents/bulk-delete', {
+        method: 'POST',
+        token,
+        body: {ids: selectedIds},
+      });
+      setSelectedIds([]);
+      setConfirmBulkDelete(false);
+      await fetchData();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to delete selected residents.');
+      setConfirmBulkDelete(false);
+    } finally {
+      setBulkDeleting(false);
+    }
+  }
+
   const previewAge = computePreviewAge(form.bday);
+  const currentModalPhotoSrc = removePhoto
+    ? ''
+    : photoDataUrl || (modalMode === 'edit' ? editingResident?.photoUrl || '' : '');
 
   return (
     <div className="space-y-6">
@@ -216,14 +457,18 @@ export function ResidentsPage({token, user, onCreateRequestForResident}: Residen
           </p>
         </div>
         <div className="flex items-center gap-3 shrink-0">
-          <button
-            type="button"
-            onClick={handleCheckDuplicates}
-            className="inline-flex items-center gap-2 px-3.5 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
-          >
-            <Users className="w-4 h-4" />
-            Check Duplicates
-          </button>
+          {user.role === 'Admin' && selectedIds.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setConfirmBulkDelete(true)}
+              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-red-700 hover:bg-red-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
+            >
+              <Trash2 className="w-4 h-4" />
+              {allFilteredSelected && selectedIds.length === residents.length
+                ? `Delete All (${selectedIds.length})`
+                : `Delete Selected (${selectedIds.length})`}
+            </button>
+          )}
           <button
             type="button"
             onClick={openCreateModal}
@@ -244,87 +489,67 @@ export function ResidentsPage({token, user, onCreateRequestForResident}: Residen
         </div>
       )}
 
-      {/* Duplicate Scanner Panel */}
-      {duplicateGroups !== null && (
-        <div className="bg-white border border-amber-300 rounded-xl p-5">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2 text-amber-800 font-semibold text-sm">
-              <AlertTriangle className="w-4 h-4" />
-              <span>
-                Duplicate Record Scan:{' '}
-                {duplicateGroups.length === 0
-                  ? 'No potential duplicates detected'
-                  : `${duplicateGroups.length} possible duplicate group(s) found`}
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={() => setDuplicateGroups(null)}
-              className="text-xs text-slate-500 hover:text-slate-800"
-            >
-              Close
-            </button>
+      {/* Search & Dropdown Filters (Purok, Sex, Classification) */}
+      <div className="bg-white border border-slate-200 rounded-xl p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
+        <div className="sm:col-span-2">
+          <label className="block text-xs font-medium text-slate-600 mb-1">Search Resident</label>
+          <div className="relative">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by name, ID, or occupation..."
+              className="w-full pl-9 pr-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-800/20 focus:border-blue-800"
+            />
           </div>
-          {duplicateGroups.length > 0 && (
-            <div className="space-y-3">
-              {duplicateGroups.map((group, idx) => (
-                <div key={idx} className="border border-slate-200 rounded-lg p-3 bg-slate-50 text-xs">
-                  <p className="font-semibold text-slate-700 mb-1.5">Possible Match Group #{idx + 1}</p>
-                  <div className="space-y-1">
-                    {group.map((r) => (
-                      <div key={r.id} className="flex items-center justify-between">
-                        <span>
-                          <span className="font-mono-num font-medium">{r.code}</span> · {r.firstName}{' '}
-                          {r.middleName} {r.lastName} · Birthdate: {r.bday} · {r.purok}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => setViewingResident(r)}
-                          className="text-blue-800 hover:underline font-medium"
-                        >
-                          Inspect
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Search & Purok Filter */}
-      <div className="bg-white border border-slate-200 rounded-xl p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-        <div className="relative flex-1 max-w-md">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search resident by name, ID, or occupation..."
-            className="w-full pl-9 pr-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-800/20 focus:border-blue-800"
-          />
         </div>
 
-        <div className="flex items-center gap-2 overflow-x-auto pb-1 lg:pb-0">
-          <span className="text-xs font-medium text-slate-500 whitespace-nowrap">Purok:</span>
-          <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
+        <div>
+          <label className="block text-xs font-medium text-slate-600 mb-1">Purok</label>
+          <select
+            value={purokFilter}
+            onChange={(e) => setPurokFilter(e.target.value)}
+            className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-800/20 focus:border-blue-800"
+          >
             {PUROK_OPTIONS.map((p) => (
-              <button
-                key={p}
-                type="button"
-                onClick={() => setPurokFilter(p)}
-                className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
-                  purokFilter === p
-                    ? 'bg-white text-slate-900 shadow-sm'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                {p}
-              </button>
+              <option key={p} value={p}>
+                {p === 'All' ? 'All Puroks' : p}
+              </option>
             ))}
-          </div>
+          </select>
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-slate-600 mb-1">Sex</label>
+          <select
+            value={sexFilter}
+            onChange={(e) => setSexFilter(e.target.value as 'All' | 'Male' | 'Female')}
+            className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-800/20 focus:border-blue-800"
+          >
+            <option value="All">All Sexes</option>
+            <option value="Male">Male</option>
+            <option value="Female">Female</option>
+          </select>
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-slate-600 mb-1">Classification</label>
+          <select
+            value={classificationFilter}
+            onChange={(e) =>
+              setClassificationFilter(
+                e.target.value as 'All' | 'Voter' | 'Senior' | 'PWD' | 'Regular',
+              )
+            }
+            className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-800/20 focus:border-blue-800"
+          >
+            <option value="All">All Classifications</option>
+            <option value="Voter">Registered Voter</option>
+            <option value="Senior">Senior Citizen</option>
+            <option value="PWD">PWD</option>
+            <option value="Regular">Regular</option>
+          </select>
         </div>
       </div>
 
@@ -349,8 +574,21 @@ export function ResidentsPage({token, user, onCreateRequestForResident}: Residen
             <table className="w-full text-left border-collapse text-sm">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50 text-xs text-slate-500">
+                  {user.role === 'Admin' && (
+                    <th className="py-3 pl-4 pr-2 font-medium w-10">
+                      <label className="inline-flex items-center gap-1.5 cursor-pointer" title="Select all rows for Delete All">
+                        <input
+                          type="checkbox"
+                          checked={allFilteredSelected}
+                          onChange={toggleSelectAllFiltered}
+                          aria-label="Select all residents"
+                          className="rounded border-slate-300 text-blue-800 focus:ring-blue-800"
+                        />
+                      </label>
+                    </th>
+                  )}
+                  <th className="py-3 px-4 font-medium">Resident</th>
                   <th className="py-3 px-4 font-medium">Resident ID</th>
-                  <th className="py-3 px-4 font-medium">Full Name</th>
                   <th className="py-3 px-4 font-medium">Sex / Age</th>
                   <th className="py-3 px-4 font-medium">Purok &amp; Address</th>
                   <th className="py-3 px-4 font-medium">Classification</th>
@@ -365,23 +603,45 @@ export function ResidentsPage({token, user, onCreateRequestForResident}: Residen
                     r.seniorCitizenStatus ? 'Senior' : null,
                     r.pwdStatus ? 'PWD' : null,
                   ].filter(Boolean);
+                  const isChecked = selectedIds.includes(r.id);
                   return (
-                    <tr key={r.id} className="hover:bg-slate-50/80 transition-colors">
+                    <tr
+                      key={r.id}
+                      className={`hover:bg-slate-50/80 transition-colors ${
+                        isChecked ? 'bg-blue-50/40' : ''
+                      }`}
+                    >
+                      {user.role === 'Admin' && (
+                        <td className="py-3 pl-4 pr-2">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => toggleSelectRow(r.id)}
+                            aria-label={`Select ${r.firstName} ${r.lastName}`}
+                            className="rounded border-slate-300 text-blue-800 focus:ring-blue-800"
+                          />
+                        </td>
+                      )}
+                      <td className="py-3 px-4">
+                        <div className="flex items-center gap-3">
+                          <ResidentAvatar resident={r} size="sm" />
+                          <div className="min-w-0">
+                            <button
+                              type="button"
+                              onClick={() => setViewingResident(r)}
+                              className="font-semibold text-slate-900 hover:text-blue-800 text-left block"
+                            >
+                              {r.lastName}, {r.firstName}{' '}
+                              {r.middleName ? `${r.middleName.charAt(0)}.` : ''} {r.suffix}
+                            </button>
+                            <div className="text-xs text-slate-500 truncate">
+                              {r.civilStatus} · {r.occupation || 'Unspecified occupation'}
+                            </div>
+                          </div>
+                        </div>
+                      </td>
                       <td className="py-3 px-4 font-mono-num text-xs font-medium text-slate-700 whitespace-nowrap">
                         {r.code}
-                      </td>
-                      <td className="py-3 px-4">
-                        <button
-                          type="button"
-                          onClick={() => setViewingResident(r)}
-                          className="font-semibold text-slate-900 hover:text-blue-800 text-left"
-                        >
-                          {r.lastName}, {r.firstName} {r.middleName ? `${r.middleName.charAt(0)}.` : ''}{' '}
-                          {r.suffix}
-                        </button>
-                        <div className="text-xs text-slate-500">
-                          {r.civilStatus} · {r.occupation || 'Unspecified occupation'}
-                        </div>
                       </td>
                       <td className="py-3 px-4 text-xs text-slate-700 whitespace-nowrap">
                         {r.sex} · <span className="font-mono-num font-medium">{r.age} yrs</span>
@@ -402,17 +662,8 @@ export function ResidentsPage({token, user, onCreateRequestForResident}: Residen
                         <div className="inline-flex items-center gap-2">
                           <button
                             type="button"
-                            onClick={() => onCreateRequestForResident(r.code)}
-                            className="inline-flex items-center gap-1 text-xs font-medium text-blue-800 hover:underline px-1.5 py-1"
-                            title="Create Document Request"
-                          >
-                            <FilePlus2 className="w-3.5 h-3.5" />
-                            Request
-                          </button>
-                          <button
-                            type="button"
                             onClick={() => openEditModal(r)}
-                            className="text-xs font-medium text-slate-700 hover:text-slate-900 px-1.5 py-1"
+                            className="text-xs font-medium text-blue-800 hover:underline px-2 py-1"
                           >
                             Edit
                           </button>
@@ -449,26 +700,29 @@ export function ResidentsPage({token, user, onCreateRequestForResident}: Residen
               </h3>
               <button
                 type="button"
-                onClick={() => setModalMode(null)}
+                onClick={closeModal}
                 className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleSaveResident} className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
+            <form
+              onSubmit={handleSaveResident}
+              className="p-6 space-y-4 max-h-[82vh] overflow-y-auto"
+            >
               {formError && (
                 <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">
                   {formError}
                 </div>
               )}
 
-              {/* Live duplicate warning when creating */}
+              {/* Automatic duplicate recognition while adding or editing */}
               {livePossibleDuplicates.length > 0 && (
                 <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900">
                   <p className="font-semibold flex items-center gap-1.5">
                     <AlertTriangle className="w-4 h-4 text-amber-700" />
-                    Possible existing resident record(s) found:
+                    Possible duplicate resident record(s) recognized:
                   </p>
                   <ul className="mt-1 space-y-0.5 pl-5 list-disc">
                     {livePossibleDuplicates.slice(0, 3).map((dup) => (
@@ -480,6 +734,96 @@ export function ResidentsPage({token, user, onCreateRequestForResident}: Residen
                   </ul>
                 </div>
               )}
+
+              {/* Resident Photo Upload / Device Camera Capture */}
+              <div className="border border-slate-200 rounded-xl p-4 bg-slate-50 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="flex items-center gap-4">
+                    <ResidentAvatar
+                      resident={{
+                        firstName: form.firstName || 'R',
+                        lastName: form.lastName || '',
+                        photoUrl: currentModalPhotoSrc,
+                      }}
+                      size="lg"
+                    />
+                    <div>
+                      <p className="text-sm font-semibold text-slate-900">Resident Photo</p>
+                      <p className="text-xs text-slate-500">
+                        Upload an image file or take a picture using the device camera
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <label className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-100 rounded-lg cursor-pointer whitespace-nowrap">
+                      <Upload className="w-3.5 h-3.5" />
+                      Upload Photo
+                      <input
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        onChange={handleFileUpload}
+                        className="sr-only"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      onClick={cameraOpen ? stopCamera : startCamera}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-blue-800 hover:bg-blue-900 rounded-lg whitespace-nowrap"
+                    >
+                      <Camera className="w-3.5 h-3.5" />
+                      {cameraOpen ? 'Close Camera' : 'Take Picture'}
+                    </button>
+                    {currentModalPhotoSrc && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPhotoDataUrl('');
+                          setRemovePhoto(true);
+                        }}
+                        className="px-2.5 py-1.5 text-xs font-medium text-red-700 hover:underline"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {cameraError && (
+                  <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2.5">
+                    {cameraError}
+                  </p>
+                )}
+
+                {cameraOpen && (
+                  <div className="pt-2 space-y-2">
+                    <video
+                      ref={videoRef}
+                      autoPlay
+                      playsInline
+                      muted
+                      className="w-full max-w-sm rounded-lg border border-slate-300 bg-slate-900 mx-auto"
+                    />
+                    <div className="flex justify-center gap-2">
+                      <button
+                        type="button"
+                        onClick={captureCameraPhoto}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
+                      >
+                        <Camera className="w-3.5 h-3.5" />
+                        Capture Photo
+                      </button>
+                      <button
+                        type="button"
+                        onClick={stopCamera}
+                        className="px-3 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-lg"
+                      >
+                        Cancel Camera
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                 <div className="sm:col-span-1">
@@ -709,7 +1053,7 @@ export function ResidentsPage({token, user, onCreateRequestForResident}: Residen
               <div className="pt-4 flex items-center justify-end gap-3 border-t border-slate-100">
                 <button
                   type="button"
-                  onClick={() => setModalMode(null)}
+                  onClick={closeModal}
                   className="px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 rounded-lg"
                 >
                   Cancel
@@ -731,17 +1075,54 @@ export function ResidentsPage({token, user, onCreateRequestForResident}: Residen
         </div>
       )}
 
+      {/* Bulk Delete Confirmation Modal */}
+      {confirmBulkDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
+          <div className="bg-white w-full max-w-md rounded-xl border border-slate-200 shadow-xl p-6 space-y-4">
+            <h3 className="text-base font-bold text-slate-900">
+              Confirm Resident Deletion
+            </h3>
+            <p className="text-sm text-slate-600">
+              You are about to permanently delete{' '}
+              <span className="font-semibold text-slate-900">{selectedIds.length}</span> selected
+              resident record(s) and their stored local photos. This action cannot be undone.
+            </p>
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setConfirmBulkDelete(false)}
+                disabled={bulkDeleting}
+                className="px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleBulkDeleteConfirm}
+                disabled={bulkDeleting}
+                className="px-4 py-2 text-sm font-medium text-white bg-red-700 hover:bg-red-800 disabled:opacity-60 rounded-lg"
+              >
+                {bulkDeleting ? 'Deleting...' : `Delete (${selectedIds.length})`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Individual Resident Profile Modal */}
       {viewingResident && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 overflow-y-auto">
           <div className="bg-white w-full max-w-2xl rounded-xl border border-slate-200 shadow-xl overflow-hidden my-8">
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50">
-              <div>
-                <p className="text-xs font-mono-num text-slate-500">{viewingResident.code}</p>
-                <h3 className="text-lg font-bold text-slate-900">
-                  {viewingResident.firstName} {viewingResident.middleName}{' '}
-                  {viewingResident.lastName} {viewingResident.suffix}
-                </h3>
+              <div className="flex items-center gap-4">
+                <ResidentAvatar resident={viewingResident} size="lg" />
+                <div>
+                  <p className="text-xs font-mono-num text-slate-500">{viewingResident.code}</p>
+                  <h3 className="text-lg font-bold text-slate-900">
+                    {viewingResident.firstName} {viewingResident.middleName}{' '}
+                    {viewingResident.lastName} {viewingResident.suffix}
+                  </h3>
+                </div>
               </div>
               <button
                 type="button"

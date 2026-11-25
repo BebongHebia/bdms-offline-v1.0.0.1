@@ -1,6 +1,6 @@
 {
   "name": "Barangay Ocho BDMS",
   "description": "Barangay Document Management System for Barangay Ocho, Malaybalay City, Bukidnon — offline-ready resident records, document generation, transaction tracking, payments, and reporting.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": ["camera"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

@@ -42,6 +42,7 @@ export interface ResidentRecord {
   voterStatus: boolean;
   pwdStatus: boolean;
   seniorCitizenStatus: boolean;
+  photoUrl?: string;
   createdAt: string;
   updatedAt: string;
 }

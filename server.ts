@@ -12,6 +12,11 @@ import {
 } from './server/auth.ts';
 import type {TokenPayload} from './server/auth.ts';
 import {
+  deleteResidentPhotoByUrl,
+  resolveSafePhotoPath,
+  saveResidentPhotoFromDataUrl,
+} from './server/photos.ts';
+import {
   buildSampleResidents,
   buildSampleTransactionsAndPayments,
   DEFAULT_STAFF_OFFICIALS,
@@ -21,6 +26,7 @@ import {
   calculateAge,
   formatResidentFullName,
   generateSequentialCode,
+  initializeDatabase,
   loadDatabase,
   saveDatabase,
   toPublicUser,
@@ -39,6 +45,7 @@ interface AuthenticatedRequest extends Request {
   auth?: TokenPayload;
 }
 
+const SESSION_COOKIE_NAME = 'bdms_session';
 const VALID_ROLES: UserRole[] = ['Admin', 'Staff', 'Treasurer'];
 const VALID_TXN_STATUSES: TransactionStatus[] = [
   'Pending',
@@ -68,13 +75,86 @@ function hasClaimedAdmin(): boolean {
   return db.users.some((u) => u.role === 'Admin' && u.status === 'Active' && Boolean(u.passwordHash));
 }
 
+function parseCookies(cookieHeader?: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!cookieHeader) return out;
+  for (const part of cookieHeader.split(';')) {
+    const eqIdx = part.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = part.slice(0, eqIdx).trim();
+    const val = part.slice(eqIdx + 1).trim();
+    if (key) {
+      try {
+        out[key] = decodeURIComponent(val);
+      } catch {
+        out[key] = val;
+      }
+    }
+  }
+  return out;
+}
+
+function isHttpsRequest(req: Request): boolean {
+  const proto = String(req.headers['x-forwarded-proto'] || '').toLowerCase();
+  return req.secure || proto.includes('https');
+}
+
+function setSessionCookie(req: Request, res: Response, token: string): void {
+  const encoded = encodeURIComponent(token);
+  const attrs = isHttpsRequest(req)
+    ? `${SESSION_COOKIE_NAME}=${encoded}; Path=/; Max-Age=43200; HttpOnly; Secure; SameSite=None; Partitioned`
+    : `${SESSION_COOKIE_NAME}=${encoded}; Path=/; Max-Age=43200; HttpOnly; SameSite=Lax`;
+  res.setHeader('Set-Cookie', attrs);
+}
+
+function clearSessionCookie(req: Request, res: Response): void {
+  const attrs = isHttpsRequest(req)
+    ? `${SESSION_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=None; Partitioned`
+    : `${SESSION_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`;
+  res.setHeader('Set-Cookie', attrs);
+}
+
+function isCsrfSafeForCookie(req: Request): boolean {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method.toUpperCase())) return true;
+  if (req.headers['x-requested-with'] === 'BDMS-Client') return true;
+  const origin = req.headers.origin;
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '');
+  if (origin && host) {
+    try {
+      const originHost = new URL(origin).host;
+      return originHost === host;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
   const header = req.headers.authorization;
-  if (!header || !header.startsWith('Bearer ')) {
+  let token = '';
+  let usedCookie = false;
+
+  if (header && header.startsWith('Bearer ')) {
+    token = header.slice(7).trim();
+  } else {
+    const cookies = parseCookies(req.headers.cookie);
+    if (cookies[SESSION_COOKIE_NAME]) {
+      token = cookies[SESSION_COOKIE_NAME];
+      usedCookie = true;
+    }
+  }
+
+  if (!token) {
     res.status(401).json({error: 'Authentication required.'});
     return;
   }
-  const token = header.slice(7).trim();
+
+  if (usedCookie && !isCsrfSafeForCookie(req)) {
+    res.status(403).json({error: 'Invalid request origin.'});
+    return;
+  }
+
   const payload = verifySessionToken(token);
   if (!payload) {
     res.status(401).json({error: 'Session expired or invalid. Please sign in again.'});
@@ -139,12 +219,42 @@ function sanitizeExtraFields(raw: unknown): DocumentExtraFields {
   return out;
 }
 
+function findDuplicateResident(
+  residents: ResidentRecord[],
+  candidate: {
+    firstName: string;
+    middleName: string;
+    lastName: string;
+    suffix: string;
+    bday: string;
+  },
+  excludeId?: string,
+): ResidentRecord | undefined {
+  const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
+  const fn = norm(candidate.firstName);
+  const mn = norm(candidate.middleName);
+  const ln = norm(candidate.lastName);
+  const suf = norm(candidate.suffix);
+  const bday = candidate.bday.trim();
+
+  return residents.find((r) => {
+    if (excludeId && r.id === excludeId) return false;
+    const sameFirstLast = norm(r.firstName) === fn && norm(r.lastName) === ln;
+    if (!sameFirstLast) return false;
+
+    const sameBday = r.bday.trim() === bday;
+    const sameMiddleAndSuffix =
+      mn !== '' && norm(r.middleName) === mn && norm(r.suffix) === suf;
+    return sameBday || sameMiddleAndSuffix;
+  });
+}
+
 async function createApp() {
   const app = express();
-  app.use(express.json({limit: '2mb'}));
+  app.set('trust proxy', 1);
+  app.use(express.json({limit: '6mb'}));
 
-  // Ensure store file exists on boot
-  loadDatabase();
+  await initializeDatabase();
 
   // ---------------- AUTH ROUTES ----------------
 
@@ -161,7 +271,7 @@ async function createApp() {
     });
   });
 
-  app.post('/api/auth/bootstrap', (req, res) => {
+  app.post('/api/auth/bootstrap', async (req, res) => {
     const envPasscode = getEnvAdminPasscode();
     if (envPasscode || hasClaimedAdmin()) {
       res.status(403).json({error: 'Initial administrator account has already been configured.'});
@@ -222,7 +332,7 @@ async function createApp() {
 
     db.users.push(newAdmin);
     appendActivityLog(db, fullName, 'Admin', 'System Initialized', 'Claimed initial Administrator account');
-    saveDatabase(db);
+    await saveDatabase(db);
 
     const token = signSessionToken({
       userId: newAdmin.id,
@@ -230,11 +340,12 @@ async function createApp() {
       role: newAdmin.role,
       fullName: newAdmin.fullName,
     });
+    setSessionCookie(req, res, token);
 
     res.status(201).json({token, user: toPublicUser(newAdmin)});
   });
 
-  app.post('/api/auth/login', (req, res) => {
+  app.post('/api/auth/login', async (req, res) => {
     const identifier = cleanStr(req.body?.identifier, 120);
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
 
@@ -247,7 +358,6 @@ async function createApp() {
     const envPasscode = getEnvAdminPasscode();
     const lowerId = identifier.toLowerCase();
 
-    // Server-side ADMIN_PASSCODE override if configured
     if (envPasscode) {
       const matchedAdmin = db.users.find(
         (u) =>
@@ -274,8 +384,9 @@ async function createApp() {
           role: 'Admin',
           fullName: adminUser.fullName,
         });
+        setSessionCookie(req, res, token);
         appendActivityLog(db, adminUser.fullName, 'Admin', 'User Login', 'Signed in via administrator credentials');
-        saveDatabase(db);
+        await saveDatabase(db);
         res.json({token, user: adminUser});
         return;
       }
@@ -301,16 +412,29 @@ async function createApp() {
       role: user.role,
       fullName: user.fullName,
     });
+    setSessionCookie(req, res, token);
 
     appendActivityLog(db, user.fullName, user.role, 'User Login', `Signed in as ${user.role}`);
-    saveDatabase(db);
+    await saveDatabase(db);
     res.json({token, user: toPublicUser(user)});
+  });
+
+  app.post('/api/auth/logout', (req, res) => {
+    clearSessionCookie(req, res);
+    res.json({ok: true});
   });
 
   app.get('/api/auth/me', requireAuth, (req: AuthenticatedRequest, res) => {
     const auth = req.auth!;
+    const freshToken = signSessionToken({
+      userId: auth.userId,
+      username: auth.username,
+      role: auth.role,
+      fullName: auth.fullName,
+    });
     if (auth.userId === 'env-admin') {
       res.json({
+        token: freshToken,
         user: {
           id: 'env-admin',
           code: 'USR-ADMIN',
@@ -331,7 +455,7 @@ async function createApp() {
       res.status(404).json({error: 'User not found.'});
       return;
     }
-    res.json({user: toPublicUser(user)});
+    res.json({token: freshToken, user: toPublicUser(user)});
   });
 
   // ---------------- DASHBOARD ROUTE ----------------
@@ -412,7 +536,7 @@ async function createApp() {
     res.json({users: db.users.map(toPublicUser)});
   });
 
-  app.post('/api/users', requireAuth, requireRole('Admin'), (req: AuthenticatedRequest, res) => {
+  app.post('/api/users', requireAuth, requireRole('Admin'), async (req: AuthenticatedRequest, res) => {
     const fullName = cleanStr(req.body?.fullName, 120);
     const username = cleanStr(req.body?.username, 60);
     const email = cleanStr(req.body?.email, 120);
@@ -463,11 +587,11 @@ async function createApp() {
       'User Created',
       `Created ${role} account for ${fullName} (${username})`,
     );
-    saveDatabase(db);
+    await saveDatabase(db);
     res.status(201).json({user: toPublicUser(newUser)});
   });
 
-  app.patch('/api/users/:id', requireAuth, requireRole('Admin'), (req: AuthenticatedRequest, res) => {
+  app.patch('/api/users/:id', requireAuth, requireRole('Admin'), async (req: AuthenticatedRequest, res) => {
     const db = loadDatabase();
     const idx = db.users.findIndex((u) => u.id === req.params.id);
     if (idx === -1) {
@@ -488,7 +612,6 @@ async function createApp() {
       return;
     }
 
-    // Prevent locking out the last active Admin
     const isCurrentlyActiveAdmin = current.role === 'Admin' && current.status === 'Active';
     const remainsActiveAdmin = nextRole === 'Admin' && nextStatus === 'Active';
     if (isCurrentlyActiveAdmin && !remainsActiveAdmin) {
@@ -538,11 +661,11 @@ async function createApp() {
       'User Updated',
       `Updated account ${db.users[idx].username} (${db.users[idx].role})`,
     );
-    saveDatabase(db);
+    await saveDatabase(db);
     res.json({user: toPublicUser(db.users[idx])});
   });
 
-  app.delete('/api/users/:id', requireAuth, requireRole('Admin'), (req: AuthenticatedRequest, res) => {
+  app.delete('/api/users/:id', requireAuth, requireRole('Admin'), async (req: AuthenticatedRequest, res) => {
     const db = loadDatabase();
     const idx = db.users.findIndex((u) => u.id === req.params.id);
     if (idx === -1) {
@@ -572,11 +695,22 @@ async function createApp() {
       'User Deleted',
       `Deleted account ${target.username}`,
     );
-    saveDatabase(db);
+    await saveDatabase(db);
     res.json({ok: true});
   });
 
-  // ---------------- RESIDENTS ROUTES ----------------
+  // ---------------- RESIDENTS & LOCAL PHOTOS ROUTES ----------------
+
+  app.get('/api/residents/photos/:filename', requireAuth, (req, res) => {
+    const filename = cleanStr(String(req.params.filename || ''), 120);
+    const safePath = resolveSafePhotoPath(filename);
+    if (!safePath) {
+      res.status(404).json({error: 'Photo not found.'});
+      return;
+    }
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.sendFile(safePath);
+  });
 
   app.get('/api/residents', requireAuth, (req, res) => {
     const db = loadDatabase();
@@ -601,41 +735,11 @@ async function createApp() {
     res.json({residents: list});
   });
 
-  app.get('/api/residents/duplicates', requireAuth, requireRole('Admin', 'Staff'), (_req, res) => {
-    const db = loadDatabase();
-    const groups: ResidentRecord[][] = [];
-    const seenIds = new Set<string>();
-
-    for (let i = 0; i < db.residents.length; i++) {
-      const a = db.residents[i];
-      if (seenIds.has(a.id)) continue;
-      const matches: ResidentRecord[] = [a];
-      const normA = `${a.firstName} ${a.lastName}`.trim().toLowerCase();
-
-      for (let j = i + 1; j < db.residents.length; j++) {
-        const b = db.residents[j];
-        const normB = `${b.firstName} ${b.lastName}`.trim().toLowerCase();
-        const sameName = normA === normB;
-        const sameLastAndBday =
-          a.lastName.trim().toLowerCase() === b.lastName.trim().toLowerCase() &&
-          a.bday === b.bday &&
-          a.firstName.trim().toLowerCase().slice(0, 3) === b.firstName.trim().toLowerCase().slice(0, 3);
-        if (sameName || sameLastAndBday) {
-          matches.push(b);
-        }
-      }
-      if (matches.length > 1) {
-        matches.forEach((m) => seenIds.add(m.id));
-        groups.push(matches);
-      }
-    }
-
-    res.json({duplicateGroups: groups});
-  });
-
-  app.post('/api/residents', requireAuth, requireRole('Admin', 'Staff'), (req: AuthenticatedRequest, res) => {
+  app.post('/api/residents', requireAuth, requireRole('Admin', 'Staff'), async (req: AuthenticatedRequest, res) => {
     const firstName = cleanStr(req.body?.firstName, 80);
+    const middleName = cleanStr(req.body?.middleName, 80);
     const lastName = cleanStr(req.body?.lastName, 80);
+    const suffix = cleanStr(req.body?.suffix, 20);
     const bday = cleanStr(req.body?.bday, 20);
     const purok = cleanStr(req.body?.purok, 60);
 
@@ -645,6 +749,20 @@ async function createApp() {
     }
 
     const db = loadDatabase();
+    const duplicate = findDuplicateResident(db.residents, {
+      firstName,
+      middleName,
+      lastName,
+      suffix,
+      bday,
+    });
+    if (duplicate) {
+      res.status(409).json({
+        error: `Duplicate resident detected: ${duplicate.firstName} ${duplicate.lastName} (${duplicate.code}, Birthdate: ${duplicate.bday}) is already registered in ${duplicate.purok}.`,
+      });
+      return;
+    }
+
     const nowIso = new Date().toISOString();
     const code = generateSequentialCode(db.settings.resPrefix, db.residents.map((r) => r.code));
     const bldgNo = cleanStr(req.body?.bldgNo, 60);
@@ -653,13 +771,23 @@ async function createApp() {
       cleanStr(req.body?.completeAddress, 240) ||
       [bldgNo, streetPurokSector].filter(Boolean).join(', ');
 
+    let photoUrl = '';
+    if (typeof req.body?.photoDataUrl === 'string' && req.body.photoDataUrl.trim()) {
+      try {
+        photoUrl = saveResidentPhotoFromDataUrl(code, req.body.photoDataUrl.trim());
+      } catch (err) {
+        res.status(400).json({error: err instanceof Error ? err.message : 'Invalid resident photo.'});
+        return;
+      }
+    }
+
     const newResident: ResidentRecord = {
       id: `res-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
       code,
       firstName,
-      middleName: cleanStr(req.body?.middleName, 80),
+      middleName,
       lastName,
-      suffix: cleanStr(req.body?.suffix, 20),
+      suffix,
       sex: req.body?.sex === 'Female' ? 'Female' : 'Male',
       bday,
       age: calculateAge(bday),
@@ -680,6 +808,7 @@ async function createApp() {
       voterStatus: Boolean(req.body?.voterStatus),
       pwdStatus: Boolean(req.body?.pwdStatus),
       seniorCitizenStatus: Boolean(req.body?.seniorCitizenStatus) || calculateAge(bday) >= 60,
+      photoUrl,
       createdAt: nowIso,
       updatedAt: nowIso,
     };
@@ -692,11 +821,11 @@ async function createApp() {
       'Resident Registered',
       `Registered ${formatResidentFullName(newResident)} (${newResident.code})`,
     );
-    saveDatabase(db);
+    await saveDatabase(db);
     res.status(201).json({resident: newResident});
   });
 
-  app.patch('/api/residents/:id', requireAuth, requireRole('Admin', 'Staff'), (req: AuthenticatedRequest, res) => {
+  app.patch('/api/residents/:id', requireAuth, requireRole('Admin', 'Staff'), async (req: AuthenticatedRequest, res) => {
     const db = loadDatabase();
     const idx = db.residents.findIndex((r) => r.id === req.params.id);
     if (idx === -1) {
@@ -705,16 +834,54 @@ async function createApp() {
     }
 
     const current = db.residents[idx];
+    const nextFirstName = req.body?.firstName ? cleanStr(req.body.firstName, 80) : current.firstName;
+    const nextMiddleName =
+      req.body?.middleName !== undefined ? cleanStr(req.body.middleName, 80) : current.middleName;
+    const nextLastName = req.body?.lastName ? cleanStr(req.body.lastName, 80) : current.lastName;
+    const nextSuffix =
+      req.body?.suffix !== undefined ? cleanStr(req.body.suffix, 20) : current.suffix;
     const nextBday = req.body?.bday ? cleanStr(req.body.bday, 20) : current.bday;
-    const nextAge = calculateAge(nextBday);
 
+    const duplicate = findDuplicateResident(
+      db.residents,
+      {
+        firstName: nextFirstName,
+        middleName: nextMiddleName,
+        lastName: nextLastName,
+        suffix: nextSuffix,
+        bday: nextBday,
+      },
+      current.id,
+    );
+    if (duplicate) {
+      res.status(409).json({
+        error: `Duplicate resident detected: matches existing record ${duplicate.firstName} ${duplicate.lastName} (${duplicate.code}, Birthdate: ${duplicate.bday}).`,
+      });
+      return;
+    }
+
+    let nextPhotoUrl = current.photoUrl || '';
+    if (req.body?.removePhoto === true) {
+      deleteResidentPhotoByUrl(current.photoUrl);
+      nextPhotoUrl = '';
+    } else if (typeof req.body?.photoDataUrl === 'string' && req.body.photoDataUrl.trim()) {
+      try {
+        const savedUrl = saveResidentPhotoFromDataUrl(current.code, req.body.photoDataUrl.trim());
+        deleteResidentPhotoByUrl(current.photoUrl);
+        nextPhotoUrl = savedUrl;
+      } catch (err) {
+        res.status(400).json({error: err instanceof Error ? err.message : 'Invalid resident photo.'});
+        return;
+      }
+    }
+
+    const nextAge = calculateAge(nextBday);
     const updated: ResidentRecord = {
       ...current,
-      firstName: req.body?.firstName ? cleanStr(req.body.firstName, 80) : current.firstName,
-      middleName:
-        req.body?.middleName !== undefined ? cleanStr(req.body.middleName, 80) : current.middleName,
-      lastName: req.body?.lastName ? cleanStr(req.body.lastName, 80) : current.lastName,
-      suffix: req.body?.suffix !== undefined ? cleanStr(req.body.suffix, 20) : current.suffix,
+      firstName: nextFirstName,
+      middleName: nextMiddleName,
+      lastName: nextLastName,
+      suffix: nextSuffix,
       sex: req.body?.sex === 'Female' || req.body?.sex === 'Male' ? req.body.sex : current.sex,
       bday: nextBday,
       age: nextAge,
@@ -744,6 +911,7 @@ async function createApp() {
         req.body?.seniorCitizenStatus !== undefined
           ? Boolean(req.body.seniorCitizenStatus)
           : current.seniorCitizenStatus,
+      photoUrl: nextPhotoUrl,
       updatedAt: new Date().toISOString(),
     };
 
@@ -763,11 +931,45 @@ async function createApp() {
       'Resident Updated',
       `Updated profile for ${formattedName} (${updated.code})`,
     );
-    saveDatabase(db);
+    await saveDatabase(db);
     res.json({resident: updated});
   });
 
-  app.delete('/api/residents/:id', requireAuth, requireRole('Admin'), (req: AuthenticatedRequest, res) => {
+  app.post('/api/residents/bulk-delete', requireAuth, requireRole('Admin'), async (req: AuthenticatedRequest, res) => {
+    const ids = Array.isArray(req.body?.ids)
+      ? req.body.ids.filter((id: unknown): id is string => typeof id === 'string')
+      : [];
+
+    if (ids.length === 0) {
+      res.status(400).json({error: 'No residents selected for deletion.'});
+      return;
+    }
+
+    const db = loadDatabase();
+    const idSet = new Set(ids);
+    const toRemove = db.residents.filter((r) => idSet.has(r.id));
+    if (toRemove.length === 0) {
+      res.status(404).json({error: 'No matching residents found.'});
+      return;
+    }
+
+    for (const r of toRemove) {
+      deleteResidentPhotoByUrl(r.photoUrl);
+    }
+
+    db.residents = db.residents.filter((r) => !idSet.has(r.id));
+    appendActivityLog(
+      db,
+      req.auth!.fullName,
+      req.auth!.role,
+      'Residents Bulk Deleted',
+      `Removed ${toRemove.length} resident record(s)`,
+    );
+    await saveDatabase(db);
+    res.json({ok: true, deletedCount: toRemove.length});
+  });
+
+  app.delete('/api/residents/:id', requireAuth, requireRole('Admin'), async (req: AuthenticatedRequest, res) => {
     const db = loadDatabase();
     const idx = db.residents.findIndex((r) => r.id === req.params.id);
     if (idx === -1) {
@@ -775,6 +977,7 @@ async function createApp() {
       return;
     }
     const target = db.residents[idx];
+    deleteResidentPhotoByUrl(target.photoUrl);
     db.residents.splice(idx, 1);
     appendActivityLog(
       db,
@@ -783,7 +986,7 @@ async function createApp() {
       'Resident Deleted',
       `Removed resident record ${formatResidentFullName(target)} (${target.code})`,
     );
-    saveDatabase(db);
+    await saveDatabase(db);
     res.json({ok: true});
   });
 
@@ -813,7 +1016,7 @@ async function createApp() {
     res.json({transactions: list});
   });
 
-  app.post('/api/transactions', requireAuth, requireRole('Admin', 'Staff'), (req: AuthenticatedRequest, res) => {
+  app.post('/api/transactions', requireAuth, requireRole('Admin', 'Staff'), async (req: AuthenticatedRequest, res) => {
     const residentCode = cleanStr(req.body?.residentCode, 40);
     const templateCode = cleanStr(req.body?.templateCode, 40);
     const purpose = cleanStr(req.body?.purpose, 240);
@@ -878,11 +1081,11 @@ async function createApp() {
       'Document Request Created',
       `${newTxn.code} — ${newTxn.documentType} for ${newTxn.residentName}`,
     );
-    saveDatabase(db);
+    await saveDatabase(db);
     res.status(201).json({transaction: newTxn});
   });
 
-  app.patch('/api/transactions/:id', requireAuth, (req: AuthenticatedRequest, res) => {
+  app.patch('/api/transactions/:id', requireAuth, async (req: AuthenticatedRequest, res) => {
     const db = loadDatabase();
     const idx = db.transactions.findIndex((t) => t.id === req.params.id);
     if (idx === -1) {
@@ -897,7 +1100,6 @@ async function createApp() {
       return;
     }
 
-    // Treasurer can only update notes or mark Ready for Release / For Payment unless payment settled
     if (req.auth!.role === 'Treasurer' && nextStatus === 'Completed' && current.paymentStatus === 'Unpaid') {
       res.status(400).json({error: 'Cannot complete an unpaid transaction before recording payment.'});
       return;
@@ -908,11 +1110,7 @@ async function createApp() {
         ? Boolean(req.body.isBypass)
         : current.isBypass;
 
-    if (
-      nextStatus === 'Completed' &&
-      current.paymentStatus === 'Unpaid' &&
-      !nextBypass
-    ) {
+    if (nextStatus === 'Completed' && current.paymentStatus === 'Unpaid' && !nextBypass) {
       res.status(400).json({
         error: 'Payment must be settled by the Treasurer before releasing this document.',
       });
@@ -949,7 +1147,7 @@ async function createApp() {
       'Transaction Updated',
       `${updated.code} status set to ${updated.status}`,
     );
-    saveDatabase(db);
+    await saveDatabase(db);
     res.json({transaction: updated});
   });
 
@@ -966,7 +1164,7 @@ async function createApp() {
     res.json({payments, awaitingPayment});
   });
 
-  app.post('/api/payments', requireAuth, requireRole('Treasurer', 'Admin'), (req: AuthenticatedRequest, res) => {
+  app.post('/api/payments', requireAuth, requireRole('Treasurer', 'Admin'), async (req: AuthenticatedRequest, res) => {
     const transactionCode = cleanStr(req.body?.transactionCode, 40);
     const amount = cleanNum(req.body?.amount, -1);
     const paymentMethod = req.body?.paymentMethod as PaymentMethod;
@@ -1038,7 +1236,7 @@ async function createApp() {
       'Payment Recorded',
       `${newPayment.orNo} (PHP ${amount.toFixed(2)}) for ${txn.code}`,
     );
-    saveDatabase(db);
+    await saveDatabase(db);
     res.status(201).json({payment: newPayment, transaction: db.transactions[txnIdx]});
   });
 
@@ -1046,7 +1244,7 @@ async function createApp() {
     '/api/payments/:id/refund',
     requireAuth,
     requireRole('Treasurer', 'Admin'),
-    (req: AuthenticatedRequest, res) => {
+    async (req: AuthenticatedRequest, res) => {
       const db = loadDatabase();
       const idx = db.payments.findIndex((p) => p.id === req.params.id);
       if (idx === -1) {
@@ -1081,7 +1279,7 @@ async function createApp() {
         'Payment Refunded',
         `Refunded ${current.orNo} (${current.transactionCode})`,
       );
-      saveDatabase(db);
+      await saveDatabase(db);
       res.json({payment: db.payments[idx]});
     },
   );
@@ -1093,7 +1291,7 @@ async function createApp() {
     res.json({staffOfficials: db.staffOfficials});
   });
 
-  app.post('/api/staff', requireAuth, requireRole('Admin'), (req: AuthenticatedRequest, res) => {
+  app.post('/api/staff', requireAuth, requireRole('Admin'), async (req: AuthenticatedRequest, res) => {
     const fullName = cleanStr(req.body?.fullName, 120);
     const position = cleanStr(req.body?.position, 100);
     const tier = [1, 2, 3].includes(Number(req.body?.tier)) ? (Number(req.body.tier) as 1 | 2 | 3) : 2;
@@ -1126,11 +1324,11 @@ async function createApp() {
       'Official Added',
       `Added ${record.fullName} — ${record.position}`,
     );
-    saveDatabase(db);
+    await saveDatabase(db);
     res.status(201).json({official: record});
   });
 
-  app.patch('/api/staff/:id', requireAuth, requireRole('Admin'), (req: AuthenticatedRequest, res) => {
+  app.patch('/api/staff/:id', requireAuth, requireRole('Admin'), async (req: AuthenticatedRequest, res) => {
     const db = loadDatabase();
     const idx = db.staffOfficials.findIndex((s) => s.id === req.params.id);
     if (idx === -1) {
@@ -1166,11 +1364,11 @@ async function createApp() {
       'Official Updated',
       `Updated ${db.staffOfficials[idx].fullName}`,
     );
-    saveDatabase(db);
+    await saveDatabase(db);
     res.json({official: db.staffOfficials[idx]});
   });
 
-  app.delete('/api/staff/:id', requireAuth, requireRole('Admin'), (req: AuthenticatedRequest, res) => {
+  app.delete('/api/staff/:id', requireAuth, requireRole('Admin'), async (req: AuthenticatedRequest, res) => {
     const db = loadDatabase();
     const idx = db.staffOfficials.findIndex((s) => s.id === req.params.id);
     if (idx === -1) {
@@ -1186,7 +1384,7 @@ async function createApp() {
       'Official Removed',
       `Removed ${removed.fullName} (${removed.code})`,
     );
-    saveDatabase(db);
+    await saveDatabase(db);
     res.json({ok: true});
   });
 
@@ -1197,7 +1395,7 @@ async function createApp() {
     res.json({templates: db.templates});
   });
 
-  app.post('/api/templates', requireAuth, requireRole('Admin'), (req: AuthenticatedRequest, res) => {
+  app.post('/api/templates', requireAuth, requireRole('Admin'), async (req: AuthenticatedRequest, res) => {
     const name = cleanStr(req.body?.name, 100);
     const headerTitle = cleanStr(req.body?.headerTitle, 140);
     const bodyTemplate = cleanStr(req.body?.bodyTemplate, 4000);
@@ -1235,11 +1433,11 @@ async function createApp() {
       'Template Created',
       `Created document template: ${newTemplate.name}`,
     );
-    saveDatabase(db);
+    await saveDatabase(db);
     res.status(201).json({template: newTemplate});
   });
 
-  app.patch('/api/templates/:id', requireAuth, requireRole('Admin'), (req: AuthenticatedRequest, res) => {
+  app.patch('/api/templates/:id', requireAuth, requireRole('Admin'), async (req: AuthenticatedRequest, res) => {
     const db = loadDatabase();
     const idx = db.templates.findIndex((t) => t.id === req.params.id);
     if (idx === -1) {
@@ -1282,11 +1480,11 @@ async function createApp() {
       'Template Updated',
       `Updated template: ${db.templates[idx].name}`,
     );
-    saveDatabase(db);
+    await saveDatabase(db);
     res.json({template: db.templates[idx]});
   });
 
-  app.delete('/api/templates/:id', requireAuth, requireRole('Admin'), (req: AuthenticatedRequest, res) => {
+  app.delete('/api/templates/:id', requireAuth, requireRole('Admin'), async (req: AuthenticatedRequest, res) => {
     const db = loadDatabase();
     const idx = db.templates.findIndex((t) => t.id === req.params.id);
     if (idx === -1) {
@@ -1302,7 +1500,7 @@ async function createApp() {
       'Template Deleted',
       `Deleted template: ${removed.name}`,
     );
-    saveDatabase(db);
+    await saveDatabase(db);
     res.json({ok: true});
   });
 
@@ -1311,7 +1509,7 @@ async function createApp() {
     res.json({settings: db.settings});
   });
 
-  app.patch('/api/settings', requireAuth, requireRole('Admin'), (req: AuthenticatedRequest, res) => {
+  app.patch('/api/settings', requireAuth, requireRole('Admin'), async (req: AuthenticatedRequest, res) => {
     const db = loadDatabase();
     db.settings = {
       ...db.settings,
@@ -1345,7 +1543,7 @@ async function createApp() {
       'Settings Updated',
       'Updated Barangay Ocho system configuration',
     );
-    saveDatabase(db);
+    await saveDatabase(db);
     res.json({settings: db.settings});
   });
 

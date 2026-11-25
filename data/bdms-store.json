@@ -554,6 +554,14 @@
   },
   "activityLogs": [
     {
+      "id": "log-1795618826469-nvsr",
+      "timestamp": "2026-11-25T15:00:26.469Z",
+      "actor": "Barangay Ocho Administrator",
+      "role": "Admin",
+      "action": "User Login",
+      "details": "Signed in as Admin"
+    },
+    {
       "id": "log-1795615958078-oqxe",
       "timestamp": "2026-11-25T14:12:38.078Z",
       "actor": "Barangay Ocho Administrator",

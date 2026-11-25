@@ -16,6 +16,7 @@ export async function apiRequest<T>(
 ): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    'X-Requested-With': 'BDMS-Client',
   };
   if (options.token) {
     headers.Authorization = `Bearer ${options.token}`;
@@ -24,6 +25,7 @@ export async function apiRequest<T>(
   const res = await fetch(path, {
     method: options.method || 'GET',
     headers,
+    credentials: 'include',
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
   });
 

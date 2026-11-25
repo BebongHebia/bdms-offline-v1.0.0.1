@@ -49,22 +49,33 @@ const NAV_ITEMS: NavItem[] = [
 export default function App() {
   const [bootstrapStatus, setBootstrapStatus] = useState<AuthBootstrapStatus | null>(null);
   const [session, setSession] = useState<AuthSession | null>(null);
+  const [checkingSession, setCheckingSession] = useState(true);
   const [activePage, setActivePage] = useState<AppPage>('dashboard');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [preselectedResidentCode, setPreselectedResidentCode] = useState<string | null>(null);
 
   useEffect(() => {
-    apiRequest<AuthBootstrapStatus>('/api/auth/status')
-      .then((res) => setBootstrapStatus(res))
-      .catch(() => {
-        setBootstrapStatus({
-          needsInitialSetup: false,
-          hasEnvPasscode: false,
-          barangayName: 'Barangay Ocho',
-          cityMunicipal: 'Malaybalay City',
-          province: 'Bukidnon',
-        });
-      });
+    let active = true;
+    Promise.all([
+      apiRequest<AuthBootstrapStatus>('/api/auth/status').catch(() => ({
+        needsInitialSetup: false,
+        hasEnvPasscode: false,
+        barangayName: 'Barangay Ocho',
+        cityMunicipal: 'Malaybalay City',
+        province: 'Bukidnon',
+      })),
+      apiRequest<AuthSession>('/api/auth/me').catch(() => null),
+    ]).then(([statusRes, meRes]) => {
+      if (!active) return;
+      setBootstrapStatus(statusRes);
+      if (meRes && meRes.user && meRes.token) {
+        setSession(meRes);
+      }
+      setCheckingSession(false);
+    });
+    return () => {
+      active = false;
+    };
   }, []);
 
   const allowedNavItems = useMemo(() => {
@@ -77,7 +88,12 @@ export default function App() {
     setActivePage('dashboard');
   }
 
-  function handleSignOut() {
+  async function handleSignOut() {
+    try {
+      await apiRequest('/api/auth/logout', {method: 'POST', token: session?.token});
+    } catch {
+      // Ignore network errors on logout
+    }
     setSession(null);
     setActivePage('dashboard');
     apiRequest<AuthBootstrapStatus>('/api/auth/status')
@@ -85,7 +101,7 @@ export default function App() {
       .catch(() => {});
   }
 
-  if (!bootstrapStatus) {
+  if (!bootstrapStatus || checkingSession) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center text-sm text-slate-500">
         Loading Barangay Ocho BDMS...
