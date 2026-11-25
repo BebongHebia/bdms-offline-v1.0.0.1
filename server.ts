@@ -26,6 +26,7 @@ import {
   calculateAge,
   formatResidentFullName,
   generateSequentialCode,
+  getActiveStorageStatus,
   initializeDatabase,
   loadDatabase,
   saveDatabase,
@@ -1507,6 +1508,10 @@ async function createApp() {
   app.get('/api/settings', requireAuth, (_req, res) => {
     const db = loadDatabase();
     res.json({settings: db.settings});
+  });
+
+  app.get('/api/system/storage', requireAuth, requireRole('Admin'), (_req, res) => {
+    res.json(getActiveStorageStatus());
   });
 
   app.patch('/api/settings', requireAuth, requireRole('Admin'), async (req: AuthenticatedRequest, res) => {

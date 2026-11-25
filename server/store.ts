@@ -7,7 +7,14 @@ import type {
   UserRecord,
   UserRole,
 } from '../src/types/bdms.ts';
-import {initMysqlDatabase, isMysqlConfigured, loadMysqlDatabase, saveMysqlDatabase} from './mysql.ts';
+import {
+  getLastMysqlError,
+  getMysqlDisplayInfo,
+  initMysqlDatabase,
+  isMysqlConfigured,
+  loadMysqlDatabase,
+  saveMysqlDatabase,
+} from './mysql.ts';
 import {createInitialDatabase, DEFAULT_SETTINGS, DEFAULT_TEMPLATES} from './seed.ts';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -85,7 +92,8 @@ export async function initializeDatabase(): Promise<'json' | 'mysql'> {
       await initMysqlDatabase(jsonDb);
       cachedDb = await loadMysqlDatabase();
       activeDriver = 'mysql';
-      console.log('BDMS storage initialized with local MySQL database.');
+      const info = getMysqlDisplayInfo();
+      console.log(`BDMS storage initialized with MySQL (${info.host}:${info.port}/${info.database}).`);
       return 'mysql';
     } catch (err) {
       console.warn(
@@ -93,6 +101,8 @@ export async function initializeDatabase(): Promise<'json' | 'mysql'> {
         err instanceof Error ? err.message : err,
       );
     }
+  } else {
+    console.log('MYSQL_HOST/MYSQL_DATABASE not set in .env; using local JSON database.');
   }
   cachedDb = jsonDb;
   activeDriver = 'json';
@@ -100,8 +110,14 @@ export async function initializeDatabase(): Promise<'json' | 'mysql'> {
   return 'json';
 }
 
-export function getActiveStorageDriver(): 'json' | 'mysql' {
-  return activeDriver;
+export function getActiveStorageStatus() {
+  const mysqlInfo = getMysqlDisplayInfo();
+  return {
+    driver: activeDriver,
+    mysqlConfigured: isMysqlConfigured(),
+    mysqlTarget: isMysqlConfigured() ? `${mysqlInfo.host}:${mysqlInfo.port}/${mysqlInfo.database}` : '',
+    mysqlError: getLastMysqlError(),
+  };
 }
 
 export function loadDatabase(): BdmsDatabase {

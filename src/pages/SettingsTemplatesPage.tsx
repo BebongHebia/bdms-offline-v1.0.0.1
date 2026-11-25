@@ -41,10 +41,18 @@ const EMPTY_TEMPLATE = {
   description: '',
 };
 
+interface StorageStatusInfo {
+  driver: 'json' | 'mysql';
+  mysqlConfigured: boolean;
+  mysqlTarget: string;
+  mysqlError: string | null;
+}
+
 export function SettingsTemplatesPage({token}: SettingsTemplatesPageProps) {
   const [activeTab, setActiveTab] = useState<'templates' | 'settings'>('templates');
   const [templates, setTemplates] = useState<DocumentTemplateRecord[]>([]);
   const [settings, setSettings] = useState<BarangaySettings | null>(null);
+  const [storageStatus, setStorageStatus] = useState<StorageStatusInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -58,12 +66,14 @@ export function SettingsTemplatesPage({token}: SettingsTemplatesPageProps) {
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [tplRes, setRes] = await Promise.all([
+      const [tplRes, setRes, storRes] = await Promise.all([
         apiRequest<{templates: DocumentTemplateRecord[]}>('/api/templates', {token}),
         apiRequest<{settings: BarangaySettings}>('/api/settings', {token}),
+        apiRequest<StorageStatusInfo>('/api/system/storage', {token}),
       ]);
       setTemplates(tplRes.templates);
       setSettings(setRes.settings);
+      setStorageStatus(storRes);
       setError(null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Failed to load configuration.');
@@ -319,10 +329,51 @@ export function SettingsTemplatesPage({token}: SettingsTemplatesPageProps) {
         </div>
       ) : (
         settings && (
-          <form
-            onSubmit={handleSaveSettings}
-            className="bg-white border border-slate-200 rounded-xl p-6 max-w-3xl space-y-5"
-          >
+          <div className="space-y-6 max-w-3xl">
+            {storageStatus && (
+              <div className="bg-white border border-slate-200 rounded-xl p-5 text-sm">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <h3 className="text-base font-semibold text-slate-900">
+                      Active Database Storage
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {storageStatus.driver === 'mysql'
+                        ? `Connected to MySQL (${storageStatus.mysqlTarget})`
+                        : 'Using local JSON database (data/bdms-store.json)'}
+                    </p>
+                  </div>
+                  <span
+                    className={`text-xs font-semibold ${
+                      storageStatus.driver === 'mysql' ? 'text-emerald-700' : 'text-blue-800'
+                    }`}
+                  >
+                    {storageStatus.driver === 'mysql' ? 'MySQL Active' : 'JSON Active'}
+                  </span>
+                </div>
+                {storageStatus.mysqlError && (
+                  <p className="mt-3 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
+                    MySQL fallback reason: {storageStatus.mysqlError}
+                  </p>
+                )}
+                {!storageStatus.mysqlConfigured && (
+                  <p className="mt-3 text-xs text-slate-600">
+                    To switch to local MySQL when running offline, configure{' '}
+                    <span className="font-mono-num">MYSQL_HOST</span>,{' '}
+                    <span className="font-mono-num">MYSQL_PORT</span>,{' '}
+                    <span className="font-mono-num">MYSQL_USER</span>,{' '}
+                    <span className="font-mono-num">MYSQL_PASSWORD</span>, and{' '}
+                    <span className="font-mono-num">MYSQL_DATABASE</span> in your local{' '}
+                    <span className="font-mono-num">.env</span> file and restart the server.
+                  </p>
+                )}
+              </div>
+            )}
+
+            <form
+              onSubmit={handleSaveSettings}
+              className="bg-white border border-slate-200 rounded-xl p-6 space-y-5"
+            >
             <h3 className="text-base font-semibold text-slate-900">
               Barangay Header &amp; Signatory Configuration
             </h3>
@@ -465,6 +516,7 @@ export function SettingsTemplatesPage({token}: SettingsTemplatesPageProps) {
               </button>
             </div>
           </form>
+          </div>
         )
       )}
 
