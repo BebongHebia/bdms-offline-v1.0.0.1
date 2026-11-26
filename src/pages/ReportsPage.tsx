@@ -123,12 +123,14 @@ export function ReportsPage({token, user}: ReportsPageProps) {
     } else {
       exportRowsToCsv(
         'barangay-ocho-transactions-report.csv',
-        ['Reference No', 'Resident ID', 'Resident Name', 'Document Type', 'Purpose', 'Date Requested', 'Payment Status', 'Status', 'Fee (PHP)'],
+        ['Reference No', 'Resident ID', 'Resident Name', 'Document Type', 'Purpose Code', 'Purpose Type', 'Purpose', 'Date Requested', 'Payment Status', 'Status', 'Fee (PHP)'],
         reportData.transactionSummary.records.map((t) => [
           t.code,
           t.residentCode,
           t.residentName,
           t.documentType,
+          t.purposeCode || '',
+          t.purposeType || '',
           t.purpose,
           t.dateCreated,
           t.paymentStatus,

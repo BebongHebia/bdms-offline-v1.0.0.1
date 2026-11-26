@@ -45,6 +45,7 @@ import type {
   TransactionStatus,
   UserRole,
 } from './src/types/bdms.ts';
+import {findPurposeEntryByCode} from './src/lib/purposes.ts';
 
 interface AuthenticatedRequest extends Request {
   auth?: TokenPayload;
@@ -1023,80 +1024,100 @@ async function createApp() {
           t.residentName.toLowerCase().includes(search) ||
           t.residentCode.toLowerCase().includes(search) ||
           t.documentType.toLowerCase().includes(search) ||
+          (t.purposeType || '').toLowerCase().includes(search) ||
+          (t.purposeCode || '').toLowerCase().includes(search) ||
           t.purpose.toLowerCase().includes(search),
       );
     }
     res.json({transactions: list});
   });
 
-  app.post('/api/transactions', requireAuth, requireRole('Admin', 'Staff'), async (req: AuthenticatedRequest, res) => {
-    const residentCode = cleanStr(req.body?.residentCode, 40);
-    const templateCode = cleanStr(req.body?.templateCode, 40);
-    const purpose = cleanStr(req.body?.purpose, 240);
-    const remarks = cleanStr(req.body?.remarks, 240);
-    const isBypass = req.auth!.role === 'Admin' && Boolean(req.body?.isBypass);
-    const extraFields = sanitizeExtraFields(req.body?.extraFields);
+  app.post(
+    '/api/transactions',
+    requireAuth,
+    requireRole('Admin', 'Staff', 'Treasurer'),
+    async (req: AuthenticatedRequest, res) => {
+      const residentCode = cleanStr(req.body?.residentCode, 40);
+      const templateCode = cleanStr(req.body?.templateCode, 40);
+      const requestedPurposeCode = cleanStr(req.body?.purposeCode, 40);
+      const requestedPurposeType = cleanStr(req.body?.purposeType, 120);
+      const requestedPurpose = cleanStr(req.body?.purpose, 240);
+      const remarks = cleanStr(req.body?.remarks, 240);
+      const isBypass = req.auth!.role === 'Admin' && Boolean(req.body?.isBypass);
+      const extraFields = sanitizeExtraFields(req.body?.extraFields);
 
-    if (!residentCode || !templateCode || !purpose) {
-      res.status(400).json({error: 'Resident, document type, and purpose are required.'});
-      return;
-    }
+      const catalogMatch = findPurposeEntryByCode(requestedPurposeCode);
+      const purposeCode = catalogMatch ? catalogMatch.option.code : requestedPurposeCode;
+      const purposeType = catalogMatch ? catalogMatch.type : requestedPurposeType;
+      const purpose =
+        catalogMatch && !catalogMatch.option.isCustom
+          ? catalogMatch.option.label
+          : requestedPurpose;
 
-    const db = loadDatabase();
-    const resident = db.residents.find((r) => r.code === residentCode);
-    if (!resident) {
-      res.status(404).json({error: 'Selected resident was not found.'});
-      return;
-    }
+      if (!residentCode || !templateCode || !purpose) {
+        res.status(400).json({error: 'Resident, document type, and purpose are required.'});
+        return;
+      }
 
-    const template = db.templates.find((t) => t.code === templateCode && t.isActive);
-    if (!template) {
-      res.status(404).json({error: 'Selected document template is not available.'});
-      return;
-    }
+      const db = loadDatabase();
+      const resident = db.residents.find((r) => r.code === residentCode);
+      if (!resident) {
+        res.status(404).json({error: 'Selected resident was not found.'});
+        return;
+      }
 
-    const isWaived = !template.requiresPayment || template.defaultFee <= 0 || Boolean(extraFields.isFTJS) || isBypass;
-    const feeAmount = isWaived ? 0 : template.defaultFee;
-    const today = new Date().toISOString().slice(0, 10);
-    const code = generateSequentialCode(db.settings.txnPrefix, db.transactions.map((t) => t.code));
-    const validityLabel =
-      template.validityDays >= 365
-        ? `${Math.round(template.validityDays / 365)} Year`
-        : `${Math.max(1, Math.round(template.validityDays / 30))} Months`;
+      const template = db.templates.find((t) => t.code === templateCode && t.isActive);
+      if (!template) {
+        res.status(404).json({error: 'Selected document template is not available.'});
+        return;
+      }
 
-    const newTxn = {
-      id: `txn-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
-      code,
-      residentCode: resident.code,
-      residentName: formatResidentFullName(resident),
-      templateCode: template.code,
-      documentType: template.name,
-      category: template.category,
-      purpose,
-      dateCreated: today,
-      issueDate: isWaived ? today : '',
-      signedBy: template.signatoryName || db.settings.punongBarangay,
-      processedBy: req.auth!.fullName,
-      validity: validityLabel,
-      remarks,
-      isBypass,
-      feeAmount,
-      paymentStatus: isWaived ? ('Waived' as const) : ('Unpaid' as const),
-      status: isWaived ? ('Processing' as TransactionStatus) : ('For Payment' as TransactionStatus),
-      extraFields,
-    };
+      const isWaived =
+        !template.requiresPayment || template.defaultFee <= 0 || Boolean(extraFields.isFTJS) || isBypass;
+      const feeAmount = isWaived ? 0 : template.defaultFee;
+      const today = new Date().toISOString().slice(0, 10);
+      const code = generateSequentialCode(db.settings.txnPrefix, db.transactions.map((t) => t.code));
+      const validityLabel =
+        template.validityDays >= 365
+          ? `${Math.round(template.validityDays / 365)} Year`
+          : `${Math.max(1, Math.round(template.validityDays / 30))} Months`;
 
-    db.transactions.unshift(newTxn);
-    appendActivityLog(
-      db,
-      req.auth!.fullName,
-      req.auth!.role,
-      'Document Request Created',
-      `${newTxn.code} — ${newTxn.documentType} for ${newTxn.residentName}`,
-    );
-    await saveDatabase(db);
-    res.status(201).json({transaction: newTxn});
-  });
+      const newTxn: TransactionRecord = {
+        id: `txn-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+        code,
+        residentCode: resident.code,
+        residentName: formatResidentFullName(resident),
+        templateCode: template.code,
+        documentType: template.name,
+        category: template.category,
+        purposeType,
+        purposeCode,
+        purpose,
+        dateCreated: today,
+        issueDate: isWaived ? today : '',
+        signedBy: template.signatoryName || db.settings.punongBarangay,
+        processedBy: req.auth!.fullName,
+        validity: validityLabel,
+        remarks,
+        isBypass,
+        feeAmount,
+        paymentStatus: isWaived ? ('Waived' as const) : ('Unpaid' as const),
+        status: isWaived ? ('Processing' as TransactionStatus) : ('For Payment' as TransactionStatus),
+        extraFields,
+      };
+
+      db.transactions.unshift(newTxn);
+      appendActivityLog(
+        db,
+        req.auth!.fullName,
+        req.auth!.role,
+        'Document Request Created',
+        `${newTxn.code} — ${newTxn.documentType} for ${newTxn.residentName}`,
+      );
+      await saveDatabase(db);
+      res.status(201).json({transaction: newTxn});
+    },
+  );
 
   app.patch('/api/transactions/:id', requireAuth, async (req: AuthenticatedRequest, res) => {
     const db = loadDatabase();
@@ -1131,7 +1152,7 @@ async function createApp() {
     }
 
     const today = new Date().toISOString().slice(0, 10);
-    const updated = {
+    const updated: TransactionRecord = {
       ...current,
       status: nextStatus,
       isBypass: nextBypass,
@@ -1142,6 +1163,14 @@ async function createApp() {
           ? current.issueDate || today
           : current.issueDate,
       remarks: req.body?.remarks !== undefined ? cleanStr(req.body.remarks, 240) : current.remarks,
+      purposeType:
+        req.auth!.role !== 'Treasurer' && req.body?.purposeType !== undefined
+          ? cleanStr(req.body.purposeType, 120)
+          : current.purposeType,
+      purposeCode:
+        req.auth!.role !== 'Treasurer' && req.body?.purposeCode !== undefined
+          ? cleanStr(req.body.purposeCode, 40)
+          : current.purposeCode,
       purpose:
         req.auth!.role !== 'Treasurer' && req.body?.purpose
           ? cleanStr(req.body.purpose, 240)

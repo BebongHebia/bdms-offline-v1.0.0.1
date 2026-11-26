@@ -145,6 +145,8 @@ export async function initMysqlDatabase(fallbackJsonDb?: BdmsDatabase): Promise<
         template_code VARCHAR(40) NOT NULL,
         document_type VARCHAR(120) NOT NULL,
         category VARCHAR(40) NOT NULL,
+        purpose_type VARCHAR(120) NOT NULL DEFAULT '',
+        purpose_code VARCHAR(40) NOT NULL DEFAULT '',
         purpose VARCHAR(255) NOT NULL,
         date_created VARCHAR(20) NOT NULL,
         issue_date VARCHAR(20) NOT NULL DEFAULT '',
@@ -159,6 +161,9 @@ export async function initMysqlDatabase(fallbackJsonDb?: BdmsDatabase): Promise<
         extra_fields LONGTEXT NULL
       ) ENGINE=InnoDB
     `);
+
+    await ensureColumn(pool, cfg.database, 'transactions', 'purpose_type', "VARCHAR(120) NOT NULL DEFAULT ''");
+    await ensureColumn(pool, cfg.database, 'transactions', 'purpose_code', "VARCHAR(40) NOT NULL DEFAULT ''");
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS payments (
@@ -365,6 +370,8 @@ export async function loadMysqlDatabase(): Promise<BdmsDatabase> {
       templateCode: String(r.template_code),
       documentType: String(r.document_type),
       category: r.category as TransactionRecord['category'],
+      purposeType: String(r.purpose_type || ''),
+      purposeCode: String(r.purpose_code || ''),
       purpose: String(r.purpose),
       dateCreated: String(r.date_created),
       issueDate: String(r.issue_date || ''),
@@ -540,9 +547,9 @@ export async function saveMysqlDatabase(db: BdmsDatabase): Promise<void> {
       await conn.query(
         `INSERT INTO transactions (
           id, code, resident_code, resident_name, template_code, document_type, category,
-          purpose, date_created, issue_date, signed_by, processed_by, validity, remarks,
-          is_bypass, fee_amount, payment_status, status, extra_fields
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          purpose_type, purpose_code, purpose, date_created, issue_date, signed_by, processed_by,
+          validity, remarks, is_bypass, fee_amount, payment_status, status, extra_fields
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           t.id,
           t.code,
@@ -551,6 +558,8 @@ export async function saveMysqlDatabase(db: BdmsDatabase): Promise<void> {
           t.templateCode,
           t.documentType,
           t.category,
+          t.purposeType || '',
+          t.purposeCode || '',
           t.purpose,
           t.dateCreated,
           t.issueDate || '',

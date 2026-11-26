@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS `transactions` (
   `template_code` VARCHAR(40) NOT NULL,
   `document_type` VARCHAR(120) NOT NULL,
   `category` VARCHAR(40) NOT NULL,
+  `purpose_type` VARCHAR(120) NOT NULL DEFAULT '',
+  `purpose_code` VARCHAR(40) NOT NULL DEFAULT '',
   `purpose` VARCHAR(255) NOT NULL,
   `date_created` VARCHAR(20) NOT NULL,
   `issue_date` VARCHAR(20) NOT NULL DEFAULT '',

@@ -88,6 +88,8 @@ export interface TransactionRecord {
   templateCode: string;
   documentType: string;
   category: DocumentCategory;
+  purposeType?: string;
+  purposeCode?: string;
   purpose: string;
   dateCreated: string;
   issueDate: string;

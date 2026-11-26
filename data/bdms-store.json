@@ -554,6 +554,30 @@
   },
   "activityLogs": [
     {
+      "id": "log-1795691609481-ewh9",
+      "timestamp": "2026-11-26T11:13:29.481Z",
+      "actor": "Barangay Ocho Administrator",
+      "role": "Admin",
+      "action": "Transactions Deleted",
+      "details": "Deleted 1 transaction(s)"
+    },
+    {
+      "id": "log-1795691609347-1iph",
+      "timestamp": "2026-11-26T11:13:29.347Z",
+      "actor": "Barangay Ocho Administrator",
+      "role": "Admin",
+      "action": "Document Request Created",
+      "details": "TXN-2026-0006 — Business Certificate / Closure for Roberto M. Villareal"
+    },
+    {
+      "id": "log-1795691609257-3d22",
+      "timestamp": "2026-11-26T11:13:29.257Z",
+      "actor": "Barangay Ocho Administrator",
+      "role": "Admin",
+      "action": "User Login",
+      "details": "Signed in as Admin"
+    },
+    {
       "id": "log-1795663880737-ho6i",
       "timestamp": "2026-11-26T03:31:20.737Z",
       "actor": "Barangay Ocho Administrator",

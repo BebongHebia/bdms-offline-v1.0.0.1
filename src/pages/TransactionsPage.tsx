@@ -2,6 +2,7 @@ import {useCallback, useEffect, useMemo, useState} from 'react';
 import {Eye, FileText, Plus, Printer, RotateCcw, Search, Trash2, X} from 'lucide-react';
 import {PrintableDocumentModal} from '../components/PrintableDocumentModal';
 import {apiRequest, ApiError, formatCurrencyPHP} from '../lib/api';
+import {PURPOSE_CATEGORIES} from '../lib/purposes';
 import type {
   BarangaySettings,
   DocumentExtraFields,
@@ -70,7 +71,9 @@ export function TransactionsPage({
   const [residentSearch, setResidentSearch] = useState('');
   const [selectedResidentCode, setSelectedResidentCode] = useState('');
   const [selectedTemplateCode, setSelectedTemplateCode] = useState('');
-  const [purpose, setPurpose] = useState('');
+  const [purposeType, setPurposeType] = useState('');
+  const [purposeCode, setPurposeCode] = useState('');
+  const [customPurpose, setCustomPurpose] = useState('');
   const [remarks, setRemarks] = useState('');
   const [isBypass, setIsBypass] = useState(false);
   const [extraFields, setExtraFields] = useState<DocumentExtraFields>({});
@@ -130,7 +133,9 @@ export function TransactionsPage({
       setSelectedResidentCode(preselectedResidentCode);
       const activeTpl = templates.find((t) => t.isActive);
       if (activeTpl) setSelectedTemplateCode(activeTpl.code);
-      setPurpose('');
+      setPurposeType('');
+      setPurposeCode('');
+      setCustomPurpose('');
       setRemarks('');
       setExtraFields({});
       setIsBypass(false);
@@ -144,6 +149,16 @@ export function TransactionsPage({
   const selectedTemplate = useMemo(
     () => activeTemplates.find((t) => t.code === selectedTemplateCode),
     [activeTemplates, selectedTemplateCode],
+  );
+
+  const selectedPurposeGroup = useMemo(
+    () => PURPOSE_CATEGORIES.find((cat) => cat.type === purposeType),
+    [purposeType],
+  );
+
+  const selectedPurposeOption = useMemo(
+    () => selectedPurposeGroup?.options.find((opt) => opt.code === purposeCode),
+    [selectedPurposeGroup, purposeCode],
   );
 
   const filteredResidentsForPicker = useMemo(() => {
@@ -165,6 +180,8 @@ export function TransactionsPage({
         t.residentName.toLowerCase().includes(q) ||
         t.residentCode.toLowerCase().includes(q) ||
         t.documentType.toLowerCase().includes(q) ||
+        (t.purposeType || '').toLowerCase().includes(q) ||
+        (t.purposeCode || '').toLowerCase().includes(q) ||
         t.purpose.toLowerCase().includes(q)
       );
     });
@@ -174,7 +191,9 @@ export function TransactionsPage({
     setSelectedResidentCode(residents[0]?.code || '');
     setSelectedTemplateCode(activeTemplates[0]?.code || '');
     setResidentSearch('');
-    setPurpose('');
+    setPurposeType('');
+    setPurposeCode('');
+    setCustomPurpose('');
     setRemarks('');
     setIsBypass(false);
     setExtraFields({});
@@ -185,8 +204,13 @@ export function TransactionsPage({
   async function handleCreateTransaction(e: React.FormEvent) {
     e.preventDefault();
     setFormError(null);
-    if (!selectedResidentCode || !selectedTemplateCode || !purpose.trim()) {
-      setFormError('Please select a resident, document type, and enter the purpose.');
+
+    const resolvedPurpose = selectedPurposeOption?.isCustom
+      ? customPurpose.trim()
+      : selectedPurposeOption?.label || '';
+
+    if (!selectedResidentCode || !selectedTemplateCode || !purposeType || !purposeCode || !resolvedPurpose) {
+      setFormError('Please select a resident, document type, purpose type, and purpose.');
       return;
     }
 
@@ -198,7 +222,9 @@ export function TransactionsPage({
         body: {
           residentCode: selectedResidentCode,
           templateCode: selectedTemplateCode,
-          purpose: purpose.trim(),
+          purposeType,
+          purposeCode,
+          purpose: resolvedPurpose,
           remarks: remarks.trim(),
           isBypass,
           extraFields,
@@ -228,7 +254,7 @@ export function TransactionsPage({
     }
   }
 
-  const canCreate = user.role === 'Admin' || user.role === 'Staff';
+  const canCreate = user.role === 'Admin' || user.role === 'Staff' || user.role === 'Treasurer';
   const canDelete = user.role === 'Admin' || user.role === 'Staff';
 
   const allFilteredSelected =
@@ -490,7 +516,14 @@ export function TransactionsPage({
                     </td>
                     <td className="py-3 px-4">
                       <div className="font-medium text-slate-800">{txn.documentType}</div>
-                      <div className="text-xs text-slate-500 max-w-xs truncate">{txn.purpose}</div>
+                      <div className="text-xs text-slate-500 max-w-xs truncate">
+                        {txn.purposeCode ? (
+                          <span className="font-mono-num text-slate-600 mr-1.5">
+                            [{txn.purposeCode}]
+                          </span>
+                        ) : null}
+                        {txn.purpose}
+                      </div>
                     </td>
                     <td className="py-3 px-4 font-mono-num text-xs text-slate-600 whitespace-nowrap">
                       {txn.dateCreated}
@@ -642,18 +675,93 @@ export function TransactionsPage({
                 </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Purpose of Request *
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={purpose}
-                  onChange={(e) => setPurpose(e.target.value)}
-                  placeholder="e.g. Local Employment, Scholarship Requirement, Medical Assistance"
-                  className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
-                />
+              <div className="border border-slate-200 rounded-lg p-4 bg-slate-50 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs font-semibold text-slate-700">Document Purpose Details</p>
+                  {purposeCode && (
+                    <span className="text-xs font-mono-num font-semibold text-blue-800">
+                      Code: {purposeCode}
+                    </span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">
+                      Purpose Type *
+                    </label>
+                    <select
+                      required
+                      value={purposeType}
+                      onChange={(e) => {
+                        setPurposeType(e.target.value);
+                        setPurposeCode('');
+                        setCustomPurpose('');
+                      }}
+                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
+                    >
+                      <option value="">Select purpose type...</option>
+                      {PURPOSE_CATEGORIES.map((cat, idx) => (
+                        <option key={cat.type} value={cat.type}>
+                          {idx + 1}. {cat.type}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">
+                      Purpose Code
+                    </label>
+                    <input
+                      type="text"
+                      readOnly
+                      value={purposeCode || 'Auto-assigned upon selection'}
+                      className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-slate-100 font-mono-num text-slate-700"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Selected Purpose *
+                  </label>
+                  <select
+                    required
+                    disabled={!purposeType}
+                    value={purposeCode}
+                    onChange={(e) => {
+                      setPurposeCode(e.target.value);
+                      if (e.target.value !== 'PRP-GP-99') setCustomPurpose('');
+                    }}
+                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white disabled:bg-slate-100 disabled:text-slate-400"
+                  >
+                    <option value="">
+                      {purposeType ? 'Select specific purpose...' : 'Choose a Purpose Type first...'}
+                    </option>
+                    {selectedPurposeGroup?.options.map((opt) => (
+                      <option key={opt.code} value={opt.code}>
+                        {opt.code} — {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {selectedPurposeOption?.isCustom && (
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">
+                      Specify Custom Purpose *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={customPurpose}
+                      onChange={(e) => setCustomPurpose(e.target.value)}
+                      placeholder="Enter exact purpose of document request..."
+                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
+                    />
+                  </div>
+                )}
               </div>
 
               {/* Dynamic ERD-backed document fields */}
@@ -891,9 +999,19 @@ export function TransactionsPage({
                     {detailTxn.status}
                   </span>
                 </div>
+                <div>
+                  <span className="text-xs text-slate-500 block">Purpose Type</span>
+                  <span className="text-slate-900">{detailTxn.purposeType || 'General'}</span>
+                </div>
+                <div>
+                  <span className="text-xs text-slate-500 block">Purpose Code</span>
+                  <span className="font-mono-num text-slate-900">
+                    {detailTxn.purposeCode || '—'}
+                  </span>
+                </div>
                 <div className="col-span-2">
-                  <span className="text-xs text-slate-500 block">Purpose</span>
-                  <span className="text-slate-900">{detailTxn.purpose}</span>
+                  <span className="text-xs text-slate-500 block">Selected Purpose</span>
+                  <span className="text-slate-900 font-medium">{detailTxn.purpose}</span>
                 </div>
                 <div>
                   <span className="text-xs text-slate-500 block">Payment Status</span>
