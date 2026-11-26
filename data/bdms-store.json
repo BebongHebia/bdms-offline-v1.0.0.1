@@ -554,6 +554,70 @@
   },
   "activityLogs": [
     {
+      "id": "log-1795698873543-inje",
+      "timestamp": "2026-11-26T13:14:33.543Z",
+      "actor": "Barangay Ocho Administrator",
+      "role": "Admin",
+      "action": "Officials Bulk Deleted",
+      "details": "Removed 1 staff/official record(s)"
+    },
+    {
+      "id": "log-1795698873446-evti",
+      "timestamp": "2026-11-26T13:14:33.446Z",
+      "actor": "Barangay Ocho Administrator",
+      "role": "Admin",
+      "action": "Official Added",
+      "details": "Added Test Kagawad — Barangay Kagawad"
+    },
+    {
+      "id": "log-1795698873394-j6io",
+      "timestamp": "2026-11-26T13:14:33.394Z",
+      "actor": "Barangay Ocho Administrator",
+      "role": "Admin",
+      "action": "User Login",
+      "details": "Signed in as Admin"
+    },
+    {
+      "id": "log-1795698192922-uxhn",
+      "timestamp": "2026-11-26T13:03:12.922Z",
+      "actor": "Barangay Ocho Administrator",
+      "role": "Admin",
+      "action": "Transactions Deleted",
+      "details": "Deleted 1 transaction(s)"
+    },
+    {
+      "id": "log-1795698192836-a1r0",
+      "timestamp": "2026-11-26T13:03:12.836Z",
+      "actor": "Barangay Ocho Administrator",
+      "role": "Admin",
+      "action": "Payment Deleted",
+      "details": "Deleted payment record OR-2026-0002 (TXN-2026-0006)"
+    },
+    {
+      "id": "log-1795698192703-xhzt",
+      "timestamp": "2026-11-26T13:03:12.703Z",
+      "actor": "Barangay Ocho Administrator",
+      "role": "Admin",
+      "action": "Payment Recorded",
+      "details": "OR-2026-0002 (PHP 50.00) for TXN-2026-0006"
+    },
+    {
+      "id": "log-1795698192561-802o",
+      "timestamp": "2026-11-26T13:03:12.561Z",
+      "actor": "Barangay Ocho Administrator",
+      "role": "Admin",
+      "action": "Document Request Created",
+      "details": "TXN-2026-0006 — Barangay Clearance for Roberto M. Villareal"
+    },
+    {
+      "id": "log-1795698192459-99xv",
+      "timestamp": "2026-11-26T13:03:12.459Z",
+      "actor": "Barangay Ocho Administrator",
+      "role": "Admin",
+      "action": "User Login",
+      "details": "Signed in as Admin"
+    },
+    {
       "id": "log-1795691609481-ewh9",
       "timestamp": "2026-11-26T11:13:29.481Z",
       "actor": "Barangay Ocho Administrator",

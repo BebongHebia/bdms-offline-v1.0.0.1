@@ -46,6 +46,7 @@ import type {
   UserRole,
 } from './src/types/bdms.ts';
 import {findPurposeEntryByCode} from './src/lib/purposes.ts';
+import {validateActiveOfficialSeatLimit} from './src/lib/officialRoles.ts';
 
 interface AuthenticatedRequest extends Request {
   auth?: TokenPayload;
@@ -1418,6 +1419,108 @@ async function createApp() {
     },
   );
 
+  app.delete(
+    '/api/payments/:id',
+    requireAuth,
+    requireRole('Treasurer', 'Admin'),
+    async (req: AuthenticatedRequest, res) => {
+      const db = loadDatabase();
+      const idx = db.payments.findIndex((p) => p.id === req.params.id);
+      if (idx === -1) {
+        res.status(404).json({error: 'Payment record not found.'});
+        return;
+      }
+
+      const removed = db.payments[idx];
+      db.payments.splice(idx, 1);
+
+      if (removed.paymentStatus === 'Paid') {
+        const hasOtherPaid = db.payments.some(
+          (p) => p.transactionCode === removed.transactionCode && p.paymentStatus === 'Paid',
+        );
+        if (!hasOtherPaid) {
+          const txnIdx = db.transactions.findIndex((t) => t.code === removed.transactionCode);
+          if (txnIdx !== -1 && db.transactions[txnIdx].paymentStatus === 'Paid') {
+            db.transactions[txnIdx] = {
+              ...db.transactions[txnIdx],
+              paymentStatus: 'Unpaid',
+              status:
+                db.transactions[txnIdx].status === 'Ready for Release'
+                  ? 'For Payment'
+                  : db.transactions[txnIdx].status,
+            };
+          }
+        }
+      }
+
+      appendActivityLog(
+        db,
+        req.auth!.fullName,
+        req.auth!.role,
+        'Payment Deleted',
+        `Deleted payment record ${removed.orNo} (${removed.transactionCode})`,
+      );
+      await saveDatabase(db);
+      res.json({ok: true});
+    },
+  );
+
+  app.post(
+    '/api/payments/bulk-delete',
+    requireAuth,
+    requireRole('Treasurer', 'Admin'),
+    async (req: AuthenticatedRequest, res) => {
+      const ids = Array.isArray(req.body?.ids)
+        ? req.body.ids.filter((id: unknown): id is string => typeof id === 'string')
+        : [];
+
+      if (ids.length === 0) {
+        res.status(400).json({error: 'No payment records selected for deletion.'});
+        return;
+      }
+
+      const db = loadDatabase();
+      const idSet = new Set(ids);
+      const removed = db.payments.filter((p) => idSet.has(p.id));
+      if (removed.length === 0) {
+        res.status(404).json({error: 'No matching payment records found.'});
+        return;
+      }
+
+      db.payments = db.payments.filter((p) => !idSet.has(p.id));
+
+      for (const pay of removed) {
+        if (pay.paymentStatus !== 'Paid') continue;
+        const hasOtherPaid = db.payments.some(
+          (p) => p.transactionCode === pay.transactionCode && p.paymentStatus === 'Paid',
+        );
+        if (!hasOtherPaid) {
+          const txnIdx = db.transactions.findIndex((t) => t.code === pay.transactionCode);
+          if (txnIdx !== -1 && db.transactions[txnIdx].paymentStatus === 'Paid') {
+            db.transactions[txnIdx] = {
+              ...db.transactions[txnIdx],
+              paymentStatus: 'Unpaid',
+              status:
+                db.transactions[txnIdx].status === 'Ready for Release'
+                  ? 'For Payment'
+                  : db.transactions[txnIdx].status,
+            };
+          }
+        }
+      }
+
+      appendActivityLog(
+        db,
+        req.auth!.fullName,
+        req.auth!.role,
+        'Payments Deleted',
+        `Deleted ${removed.length} payment record(s)`,
+      );
+      await saveDatabase(db);
+      res.json({ok: true, deletedCount: removed.length});
+    },
+  );
+
   // ---------------- STAFF & OFFICIALS + ORG CHART ----------------
 
   app.get('/api/staff/photos/:filename', requireAuth, (req, res) => {
@@ -1440,12 +1543,19 @@ async function createApp() {
     const fullName = cleanStr(req.body?.fullName, 120);
     const position = cleanStr(req.body?.position, 100);
     const tier = [1, 2, 3].includes(Number(req.body?.tier)) ? (Number(req.body.tier) as 1 | 2 | 3) : 2;
+    const status: 'Active' | 'Inactive' = req.body?.status === 'Inactive' ? 'Inactive' : 'Active';
     if (!fullName || !position) {
       res.status(400).json({error: 'Full name and position are required.'});
       return;
     }
 
     const db = loadDatabase();
+    const quotaError = validateActiveOfficialSeatLimit(db.staffOfficials, {position, status});
+    if (quotaError) {
+      res.status(400).json({error: quotaError});
+      return;
+    }
+
     const code = generateSequentialCode('OFF', db.staffOfficials.map((s) => s.code));
 
     let photoUrl = '';
@@ -1471,7 +1581,7 @@ async function createApp() {
       termStart: cleanStr(req.body?.termStart, 20),
       termEnd: cleanStr(req.body?.termEnd, 20),
       photoUrl,
-      status: req.body?.status === 'Inactive' ? 'Inactive' : 'Active',
+      status,
     };
 
     db.staffOfficials.push(record);
@@ -1498,6 +1608,19 @@ async function createApp() {
     const nextTier = [1, 2, 3].includes(Number(req.body?.tier))
       ? (Number(req.body.tier) as 1 | 2 | 3)
       : current.tier;
+    const nextPosition = req.body?.position ? cleanStr(req.body.position, 100) : current.position;
+    const nextStatus: 'Active' | 'Inactive' =
+      req.body?.status === 'Inactive' || req.body?.status === 'Active' ? req.body.status : current.status;
+
+    const quotaError = validateActiveOfficialSeatLimit(
+      db.staffOfficials,
+      {position: nextPosition, status: nextStatus},
+      current.id,
+    );
+    if (quotaError) {
+      res.status(400).json({error: quotaError});
+      return;
+    }
 
     let nextPhotoUrl = current.photoUrl || '';
     if (req.body?.removePhoto === true) {
@@ -1517,7 +1640,7 @@ async function createApp() {
     db.staffOfficials[idx] = {
       ...current,
       fullName: req.body?.fullName ? cleanStr(req.body.fullName, 120) : current.fullName,
-      position: req.body?.position ? cleanStr(req.body.position, 100) : current.position,
+      position: nextPosition,
       tier: nextTier,
       committee: req.body?.committee !== undefined ? cleanStr(req.body.committee, 140) : current.committee,
       reportsTo: req.body?.reportsTo !== undefined ? cleanStr(req.body.reportsTo, 40) : current.reportsTo,
@@ -1527,8 +1650,7 @@ async function createApp() {
       termEnd: req.body?.termEnd !== undefined ? cleanStr(req.body.termEnd, 20) : current.termEnd,
       resCode: req.body?.resCode !== undefined ? cleanStr(req.body.resCode, 40) : current.resCode,
       photoUrl: nextPhotoUrl,
-      status:
-        req.body?.status === 'Inactive' || req.body?.status === 'Active' ? req.body.status : current.status,
+      status: nextStatus,
     };
 
     appendActivityLog(
@@ -1540,6 +1662,40 @@ async function createApp() {
     );
     await saveDatabase(db);
     res.json({official: db.staffOfficials[idx]});
+  });
+
+  app.post('/api/staff/bulk-delete', requireAuth, requireRole('Admin'), async (req: AuthenticatedRequest, res) => {
+    const ids = Array.isArray(req.body?.ids)
+      ? req.body.ids.filter((id: unknown): id is string => typeof id === 'string')
+      : [];
+
+    if (ids.length === 0) {
+      res.status(400).json({error: 'No officials selected for deletion.'});
+      return;
+    }
+
+    const db = loadDatabase();
+    const idSet = new Set(ids);
+    const toRemove = db.staffOfficials.filter((s) => idSet.has(s.id));
+    if (toRemove.length === 0) {
+      res.status(404).json({error: 'No matching officials found.'});
+      return;
+    }
+
+    for (const s of toRemove) {
+      deleteOfficialPhotoByUrl(s.photoUrl);
+    }
+
+    db.staffOfficials = db.staffOfficials.filter((s) => !idSet.has(s.id));
+    appendActivityLog(
+      db,
+      req.auth!.fullName,
+      req.auth!.role,
+      'Officials Bulk Deleted',
+      `Removed ${toRemove.length} staff/official record(s)`,
+    );
+    await saveDatabase(db);
+    res.json({ok: true, deletedCount: toRemove.length});
   });
 
   app.delete('/api/staff/:id', requireAuth, requireRole('Admin'), async (req: AuthenticatedRequest, res) => {

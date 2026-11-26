@@ -1,6 +1,12 @@
-import {useCallback, useEffect, useRef, useState} from 'react';
+import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {Camera, Plus, Search, Trash2, Upload, X} from 'lucide-react';
 import {apiRequest, ApiError} from '../lib/api';
+import {
+  matchStatutoryRole,
+  STANDARD_OFFICIAL_POSITIONS,
+  STATUTORY_ROLE_RULES,
+  validateActiveOfficialSeatLimit,
+} from '../lib/officialRoles';
 import type {StaffOfficialRecord} from '../types/bdms';
 
 interface StaffOfficialsPageProps {
@@ -101,13 +107,22 @@ export function StaffOfficialsPage({token}: StaffOfficialsPageProps) {
   const [officials, setOfficials] = useState<StaffOfficialRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'All' | 'Active' | 'Inactive'>('All');
+
+  // Bulk selection state
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   const [modalMode, setModalMode] = useState<'create' | 'edit' | null>(null);
   const [editing, setEditing] = useState<StaffOfficialRecord | null>(null);
   const [form, setForm] = useState(EMPTY_OFFICIAL);
+  const [useCustomPosition, setUseCustomPosition] = useState(false);
   const [photoDataUrl, setPhotoDataUrl] = useState<string>('');
   const [removePhoto, setRemovePhoto] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   // Camera capture state
@@ -136,6 +151,7 @@ export function StaffOfficialsPage({token}: StaffOfficialsPageProps) {
     try {
       const res = await apiRequest<{staffOfficials: StaffOfficialRecord[]}>('/api/staff', {token});
       setOfficials(res.staffOfficials);
+      setSelectedIds((prev) => prev.filter((id) => res.staffOfficials.some((o) => o.id === id)));
       setError(null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Failed to load staff & officials.');
@@ -148,31 +164,90 @@ export function StaffOfficialsPage({token}: StaffOfficialsPageProps) {
     fetchOfficials();
   }, [fetchOfficials]);
 
-  const filtered = officials.filter((o) => {
+  const seatSummary = useMemo(() => {
+    return STATUTORY_ROLE_RULES.map((rule) => {
+      const activeCount = officials.filter(
+        (o) => o.status === 'Active' && matchStatutoryRole(o.position)?.key === rule.key,
+      ).length;
+      const inactiveCount = officials.filter(
+        (o) => o.status === 'Inactive' && matchStatutoryRole(o.position)?.key === rule.key,
+      ).length;
+      return {...rule, activeCount, inactiveCount};
+    });
+  }, [officials]);
+
+  const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return true;
-    return (
-      o.fullName.toLowerCase().includes(q) ||
-      o.position.toLowerCase().includes(q) ||
-      o.committee.toLowerCase().includes(q) ||
-      o.code.toLowerCase().includes(q)
+    return officials.filter((o) => {
+      if (statusFilter !== 'All' && o.status !== statusFilter) return false;
+      if (!q) return true;
+      return (
+        o.fullName.toLowerCase().includes(q) ||
+        o.position.toLowerCase().includes(q) ||
+        o.committee.toLowerCase().includes(q) ||
+        o.code.toLowerCase().includes(q)
+      );
+    });
+  }, [officials, search, statusFilter]);
+
+  const allFilteredSelected =
+    filtered.length > 0 && filtered.every((o) => selectedIds.includes(o.id));
+
+  function toggleSelectAllFiltered() {
+    if (allFilteredSelected) {
+      const filteredSet = new Set(filtered.map((o) => o.id));
+      setSelectedIds((prev) => prev.filter((id) => !filteredSet.has(id)));
+    } else {
+      const next = new Set(selectedIds);
+      filtered.forEach((o) => next.add(o.id));
+      setSelectedIds(Array.from(next));
+    }
+  }
+
+  function toggleSelectRow(id: string) {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
     );
-  });
+  }
+
+  function pickDefaultAvailablePosition(): {position: string; tier: 1 | 2 | 3} {
+    for (const pos of STANDARD_OFFICIAL_POSITIONS) {
+      const rule = matchStatutoryRole(pos.value);
+      if (!rule) return {position: pos.value, tier: pos.defaultTier};
+      const activeCount = officials.filter(
+        (o) => o.status === 'Active' && matchStatutoryRole(o.position)?.key === rule.key,
+      ).length;
+      if (activeCount < rule.limit) {
+        return {position: pos.value, tier: pos.defaultTier};
+      }
+    }
+    return {position: 'Barangay Clerk / Records Staff', tier: 3};
+  }
 
   function openCreate() {
     stopCamera();
+    const suggested = pickDefaultAvailablePosition();
     setModalMode('create');
     setEditing(null);
-    setForm(EMPTY_OFFICIAL);
+    setUseCustomPosition(false);
+    setForm({
+      ...EMPTY_OFFICIAL,
+      position: suggested.position,
+      tier: suggested.tier,
+      status: 'Active',
+    });
     setPhotoDataUrl('');
     setRemovePhoto(false);
     setCameraError(null);
+    setFormError(null);
   }
 
   function openEdit(o: StaffOfficialRecord) {
     stopCamera();
+    const isStandard = STANDARD_OFFICIAL_POSITIONS.some((p) => p.value === o.position);
     setModalMode('edit');
     setEditing(o);
+    setUseCustomPosition(!isStandard);
     setForm({
       fullName: o.fullName,
       position: o.position,
@@ -187,6 +262,7 @@ export function StaffOfficialsPage({token}: StaffOfficialsPageProps) {
     setPhotoDataUrl('');
     setRemovePhoto(false);
     setCameraError(null);
+    setFormError(null);
   }
 
   function closeModal() {
@@ -255,8 +331,26 @@ export function StaffOfficialsPage({token}: StaffOfficialsPageProps) {
     stopCamera();
   }
 
+  const liveSeatQuotaError = useMemo(
+    () =>
+      modalMode
+        ? validateActiveOfficialSeatLimit(
+            officials,
+            {position: form.position, status: form.status},
+            modalMode === 'edit' ? editing?.id : undefined,
+          )
+        : null,
+    [modalMode, officials, form.position, form.status, editing],
+  );
+
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
+    setFormError(null);
+    if (liveSeatQuotaError) {
+      setFormError(liveSeatQuotaError);
+      return;
+    }
+
     setSaving(true);
     try {
       if (modalMode === 'create') {
@@ -280,7 +374,7 @@ export function StaffOfficialsPage({token}: StaffOfficialsPageProps) {
       setModalMode(null);
       await fetchOfficials();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Failed to save official.');
+      setFormError(err instanceof ApiError ? err.message : 'Failed to save official.');
     } finally {
       setSaving(false);
     }
@@ -295,6 +389,28 @@ export function StaffOfficialsPage({token}: StaffOfficialsPageProps) {
     }
   }
 
+  async function handleBulkDeleteConfirm() {
+    if (selectedIds.length === 0) return;
+    setBulkDeleting(true);
+    setNotice(null);
+    try {
+      const res = await apiRequest<{deletedCount: number}>('/api/staff/bulk-delete', {
+        method: 'POST',
+        token,
+        body: {ids: selectedIds},
+      });
+      setSelectedIds([]);
+      setConfirmBulkDelete(false);
+      setNotice(`Deleted ${res.deletedCount} staff/official record(s).`);
+      await fetchOfficials();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to delete selected records.');
+      setConfirmBulkDelete(false);
+    } finally {
+      setBulkDeleting(false);
+    }
+  }
+
   const currentModalPhotoSrc = removePhoto
     ? ''
     : photoDataUrl || (modalMode === 'edit' ? editing?.photoUrl || '' : '');
@@ -305,18 +421,69 @@ export function StaffOfficialsPage({token}: StaffOfficialsPageProps) {
         <div>
           <h2 className="text-2xl font-bold text-slate-900">Barangay Staff &amp; Officials</h2>
           <p className="text-sm text-slate-600 mt-0.5">
-            Maintain elected Sangguniang Barangay officials and administrative personnel
+            Maintain active Barangay Ocho officials (1 Punong Barangay, 7 Kagawad, 1 SK
+            Chairperson, 1 Secretary, 1 Treasurer) and support staff
           </p>
         </div>
-        <button
-          type="button"
-          onClick={openCreate}
-          className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-blue-800 hover:bg-blue-900 rounded-lg whitespace-nowrap shrink-0"
-        >
-          <Plus className="w-4 h-4" />
-          Add Official / Staff
-        </button>
+        <div className="flex items-center gap-3 shrink-0">
+          {selectedIds.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setConfirmBulkDelete(true)}
+              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-red-700 hover:bg-red-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
+            >
+              <Trash2 className="w-4 h-4" />
+              {allFilteredSelected && selectedIds.length === officials.length
+                ? `Delete All (${selectedIds.length})`
+                : `Delete Selected (${selectedIds.length})`}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={openCreate}
+            className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-blue-800 hover:bg-blue-900 rounded-lg whitespace-nowrap shrink-0"
+          >
+            <Plus className="w-4 h-4" />
+            Add Official / Staff
+          </button>
+        </div>
       </div>
+
+      {/* Statutory Active Official Seat Quotas */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+        {seatSummary.map((seat) => {
+          const isFull = seat.activeCount >= seat.limit;
+          return (
+            <div
+              key={seat.key}
+              className="bg-white border border-slate-200 rounded-xl px-4 py-3 flex flex-col justify-between"
+            >
+              <p className="text-xs font-medium text-slate-500 truncate">{seat.label}</p>
+              <div className="mt-1 flex items-baseline justify-between gap-2">
+                <span className="text-lg font-bold font-mono-num text-slate-900">
+                  {seat.activeCount}/{seat.limit}
+                </span>
+                <span
+                  className={`text-[11px] font-medium ${
+                    isFull ? 'text-emerald-700' : 'text-amber-700'
+                  }`}
+                >
+                  {isFull ? 'Active Full' : `${seat.limit - seat.activeCount} Open`}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {notice && (
+        <div className="p-3.5 rounded-lg bg-emerald-50 border border-emerald-200 text-sm text-emerald-800 flex items-center justify-between">
+          <span>{notice}</span>
+          <button type="button" onClick={() => setNotice(null)} className="text-xs underline">
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {error && (
         <div className="p-3.5 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700 flex items-center justify-between">
@@ -327,8 +494,8 @@ export function StaffOfficialsPage({token}: StaffOfficialsPageProps) {
         </div>
       )}
 
-      <div className="bg-white border border-slate-200 rounded-xl p-4">
-        <div className="relative max-w-md">
+      <div className="bg-white border border-slate-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="relative flex-1 max-w-md">
           <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
@@ -337,6 +504,22 @@ export function StaffOfficialsPage({token}: StaffOfficialsPageProps) {
             placeholder="Search by name, position, or committee..."
             className="w-full pl-9 pr-3 py-2 text-sm border border-slate-300 rounded-lg"
           />
+        </div>
+        <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg self-start">
+          {(['All', 'Active', 'Inactive'] as const).map((st) => (
+            <button
+              key={st}
+              type="button"
+              onClick={() => setStatusFilter(st)}
+              className={`px-3 py-1 text-xs font-medium rounded-md ${
+                statusFilter === st
+                  ? 'bg-white text-slate-900 shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              {st}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -352,6 +535,16 @@ export function StaffOfficialsPage({token}: StaffOfficialsPageProps) {
             <table className="w-full text-left border-collapse text-sm">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50 text-xs text-slate-500">
+                  <th className="py-3 pl-4 pr-2 font-medium w-10">
+                    <input
+                      type="checkbox"
+                      checked={allFilteredSelected}
+                      onChange={toggleSelectAllFiltered}
+                      aria-label="Select all officials and staff"
+                      title="Select all rows"
+                      className="rounded border-slate-300 text-blue-800 focus:ring-blue-800"
+                    />
+                  </th>
                   <th className="py-3 px-4 font-medium">Code</th>
                   <th className="py-3 px-4 font-medium">Official / Staff</th>
                   <th className="py-3 px-4 font-medium">Position</th>
@@ -362,61 +555,78 @@ export function StaffOfficialsPage({token}: StaffOfficialsPageProps) {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {filtered.map((o) => (
-                  <tr key={o.id} className="hover:bg-slate-50/80">
-                    <td className="py-3 px-4 font-mono-num text-xs text-slate-500 whitespace-nowrap">
-                      {o.code}
-                    </td>
-                    <td className="py-3 px-4">
-                      <div className="flex items-center gap-3">
-                        <OfficialAvatar fullName={o.fullName} photoUrl={o.photoUrl} size="sm" />
-                        <div className="min-w-0">
-                          <div className="font-semibold text-slate-900">{o.fullName}</div>
-                          {o.contactNumber && (
-                            <div className="text-xs font-mono-num text-slate-500">
-                              {o.contactNumber}
-                            </div>
-                          )}
+                {filtered.map((o) => {
+                  const isChecked = selectedIds.includes(o.id);
+                  return (
+                    <tr
+                      key={o.id}
+                      className={`hover:bg-slate-50/80 transition-colors ${
+                        isChecked ? 'bg-blue-50/40' : ''
+                      }`}
+                    >
+                      <td className="py-3 pl-4 pr-2">
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => toggleSelectRow(o.id)}
+                          aria-label={`Select ${o.fullName}`}
+                          className="rounded border-slate-300 text-blue-800 focus:ring-blue-800"
+                        />
+                      </td>
+                      <td className="py-3 px-4 font-mono-num text-xs text-slate-500 whitespace-nowrap">
+                        {o.code}
+                      </td>
+                      <td className="py-3 px-4">
+                        <div className="flex items-center gap-3">
+                          <OfficialAvatar fullName={o.fullName} photoUrl={o.photoUrl} size="sm" />
+                          <div className="min-w-0">
+                            <div className="font-semibold text-slate-900">{o.fullName}</div>
+                            {o.contactNumber && (
+                              <div className="text-xs font-mono-num text-slate-500">
+                                {o.contactNumber}
+                              </div>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    </td>
-                    <td className="py-3 px-4 font-medium text-slate-800">{o.position}</td>
-                    <td className="py-3 px-4 text-slate-600 text-xs">{o.committee || '—'}</td>
-                    <td className="py-3 px-4 font-mono-num text-xs text-slate-500 whitespace-nowrap">
-                      {o.termStart || '—'} to {o.termEnd || '—'}
-                    </td>
-                    <td className="py-3 px-4 text-xs">
-                      <span
-                        className={
-                          o.status === 'Active'
-                            ? 'font-semibold text-emerald-700'
-                            : 'font-semibold text-red-700'
-                        }
-                      >
-                        {o.status}
-                      </span>
-                    </td>
-                    <td className="py-3 px-4 text-right whitespace-nowrap">
-                      <div className="inline-flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => openEdit(o)}
-                          className="text-xs font-medium text-blue-800 hover:underline px-2 py-1"
+                      </td>
+                      <td className="py-3 px-4 font-medium text-slate-800">{o.position}</td>
+                      <td className="py-3 px-4 text-slate-600 text-xs">{o.committee || '—'}</td>
+                      <td className="py-3 px-4 font-mono-num text-xs text-slate-500 whitespace-nowrap">
+                        {o.termStart || '—'} to {o.termEnd || '—'}
+                      </td>
+                      <td className="py-3 px-4 text-xs">
+                        <span
+                          className={
+                            o.status === 'Active'
+                              ? 'font-semibold text-emerald-700'
+                              : 'font-semibold text-red-700'
+                          }
                         >
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDelete(o)}
-                          className="p-1 text-slate-400 hover:text-red-700"
-                          title="Delete Official"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                          {o.status}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-right whitespace-nowrap">
+                        <div className="inline-flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => openEdit(o)}
+                            className="text-xs font-medium text-blue-800 hover:underline px-2 py-1"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDelete(o)}
+                            className="p-1 text-slate-400 hover:text-red-700"
+                            title="Delete Official"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -439,6 +649,12 @@ export function StaffOfficialsPage({token}: StaffOfficialsPageProps) {
               </button>
             </div>
             <form onSubmit={handleSave} className="p-6 space-y-4 max-h-[82vh] overflow-y-auto">
+              {(formError || liveSeatQuotaError) && (
+                <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900 font-medium">
+                  {formError || liveSeatQuotaError}
+                </div>
+              )}
+
               {/* Official Photo Upload / Camera Capture */}
               <div className="border border-slate-200 rounded-xl p-4 bg-slate-50 space-y-3">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -542,14 +758,45 @@ export function StaffOfficialsPage({token}: StaffOfficialsPageProps) {
                   <label className="block text-xs font-medium text-slate-700 mb-1">
                     Position *
                   </label>
-                  <input
-                    type="text"
-                    required
-                    value={form.position}
-                    onChange={(e) => setForm({...form, position: e.target.value})}
-                    placeholder="e.g. Barangay Kagawad"
-                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
-                  />
+                  <select
+                    value={useCustomPosition ? '__custom__' : form.position}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val === '__custom__') {
+                        setUseCustomPosition(true);
+                        setForm({...form, position: '', tier: 3});
+                      } else {
+                        setUseCustomPosition(false);
+                        const preset = STANDARD_OFFICIAL_POSITIONS.find((p) => p.value === val);
+                        setForm({
+                          ...form,
+                          position: val,
+                          tier: preset ? preset.defaultTier : form.tier,
+                        });
+                      }
+                      setFormError(null);
+                    }}
+                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
+                  >
+                    {STANDARD_OFFICIAL_POSITIONS.map((p) => {
+                      const rule = matchStatutoryRole(p.value);
+                      const activeCnt = rule
+                        ? officials.filter(
+                            (o) =>
+                              o.id !== editing?.id &&
+                              o.status === 'Active' &&
+                              matchStatutoryRole(o.position)?.key === rule.key,
+                          ).length
+                        : null;
+                      return (
+                        <option key={p.value} value={p.value}>
+                          {p.value}
+                          {rule && activeCnt !== null ? ` (${activeCnt}/${rule.limit} active)` : ''}
+                        </option>
+                      );
+                    })}
+                    <option value="__custom__">Other Staff Position...</option>
+                  </select>
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">
@@ -566,6 +813,22 @@ export function StaffOfficialsPage({token}: StaffOfficialsPageProps) {
                   </select>
                 </div>
               </div>
+
+              {useCustomPosition && (
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Custom Position Title *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={form.position}
+                    onChange={(e) => setForm({...form, position: e.target.value})}
+                    placeholder="e.g. Barangay Nutrition Scholar"
+                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                  />
+                </div>
+              )}
 
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1">
@@ -638,9 +901,10 @@ export function StaffOfficialsPage({token}: StaffOfficialsPageProps) {
                   <label className="block text-xs font-medium text-slate-700 mb-1">Status</label>
                   <select
                     value={form.status}
-                    onChange={(e) =>
-                      setForm({...form, status: e.target.value as 'Active' | 'Inactive'})
-                    }
+                    onChange={(e) => {
+                      setForm({...form, status: e.target.value as 'Active' | 'Inactive'});
+                      setFormError(null);
+                    }}
                     className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
                   >
                     <option value="Active">Active</option>
@@ -659,13 +923,47 @@ export function StaffOfficialsPage({token}: StaffOfficialsPageProps) {
                 </button>
                 <button
                   type="submit"
-                  disabled={saving}
-                  className="px-4 py-2 text-sm font-medium text-white bg-blue-800 hover:bg-blue-900 rounded-lg"
+                  disabled={saving || Boolean(liveSeatQuotaError)}
+                  className="px-4 py-2 text-sm font-medium text-white bg-blue-800 hover:bg-blue-900 disabled:opacity-50 rounded-lg"
                 >
                   {saving ? 'Saving...' : 'Save Record'}
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Delete Confirmation Modal */}
+      {confirmBulkDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
+          <div className="bg-white w-full max-w-md rounded-xl border border-slate-200 shadow-xl p-6 space-y-4">
+            <h3 className="text-base font-bold text-slate-900">
+              Confirm Official / Staff Deletion
+            </h3>
+            <p className="text-sm text-slate-600">
+              Are you sure you want to delete{' '}
+              <span className="font-semibold text-slate-900">{selectedIds.length}</span> selected
+              staff/official record(s)?
+            </p>
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setConfirmBulkDelete(false)}
+                disabled={bulkDeleting}
+                className="px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleBulkDeleteConfirm}
+                disabled={bulkDeleting}
+                className="px-4 py-2 text-sm font-medium text-white bg-red-700 hover:bg-red-800 disabled:opacity-60 rounded-lg"
+              >
+                {bulkDeleting ? 'Deleting...' : `Delete (${selectedIds.length})`}
+              </button>
+            </div>
           </div>
         </div>
       )}

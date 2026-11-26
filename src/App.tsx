@@ -119,7 +119,7 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-50 flex">
       {/* Desktop Sidebar */}
-      <aside className="no-print hidden lg:flex lg:w-64 lg:flex-col bg-slate-900 text-slate-100 shrink-0 border-r border-slate-800">
+      <aside className="no-print hidden lg:fixed lg:inset-y-0 lg:left-0 lg:z-30 lg:flex lg:w-64 lg:flex-col bg-slate-900 text-slate-100 border-r border-slate-800">
         <div className="px-5 py-5 border-b border-slate-800 flex items-center gap-3">
           <BarangaySeal size={38} className="shrink-0" />
           <div className="min-w-0">
@@ -228,7 +228,7 @@ export default function App() {
       )}
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 lg:pl-64 print:pl-0">
         {/* Workspace Top Bar */}
         <header className="no-print bg-white border-b border-slate-200 px-4 sm:px-8 h-14 flex items-center justify-between gap-4 shrink-0">
           <div className="flex items-center gap-3 min-w-0">

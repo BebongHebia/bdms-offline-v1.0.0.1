@@ -48,6 +48,12 @@ function txnStatusStyle(status: TransactionStatus): string {
   }
 }
 
+function canPrintTransaction(txn: TransactionRecord): boolean {
+  if (txn.status === 'Cancelled') return false;
+  if (txn.feeAmount <= 0) return true;
+  return txn.paymentStatus === 'Paid' || txn.paymentStatus === 'Waived' || txn.isBypass;
+}
+
 export function TransactionsPage({
   token,
   user,
@@ -169,6 +175,11 @@ export function TransactionsPage({
       return full.includes(q);
     });
   }, [residents, residentSearch]);
+
+  const selectedResident = useMemo(
+    () => residents.find((r) => r.code === selectedResidentCode) || null,
+    [residents, selectedResidentCode],
+  );
 
   const filteredTransactions = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -559,14 +570,15 @@ export function TransactionsPage({
                           <Eye className="w-3.5 h-3.5" />
                           Details
                         </button>
-                        {user.role !== 'Treasurer' && txn.status !== 'Cancelled' && (
+                        {user.role !== 'Treasurer' && canPrintTransaction(txn) && (
                           <button
                             type="button"
                             onClick={() => setPrintingTxn(txn)}
                             className="inline-flex items-center gap-1 text-xs font-medium text-blue-800 hover:underline px-2 py-1"
+                            title="Print Official Document"
                           >
                             <Printer className="w-3.5 h-3.5" />
-                            Generate
+                            Print
                           </button>
                         )}
                       </div>
@@ -612,7 +624,21 @@ export function TransactionsPage({
                 <input
                   type="text"
                   value={residentSearch}
-                  onChange={(e) => setResidentSearch(e.target.value)}
+                  onChange={(e) => {
+                    const q = e.target.value;
+                    setResidentSearch(q);
+                    const lower = q.trim().toLowerCase();
+                    const matches = lower
+                      ? residents.filter((r) =>
+                          `${r.firstName} ${r.middleName} ${r.lastName} ${r.code} ${r.purok}`
+                            .toLowerCase()
+                            .includes(lower),
+                        )
+                      : residents.slice(0, 40);
+                    if (matches.length > 0 && !matches.some((r) => r.code === selectedResidentCode)) {
+                      setSelectedResidentCode(matches[0].code);
+                    }
+                  }}
                   placeholder="Type resident name or ID to filter..."
                   className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg mb-2"
                 />
@@ -632,6 +658,49 @@ export function TransactionsPage({
                     ))
                   )}
                 </select>
+
+                {selectedResident && (
+                  <div className="mt-2.5 p-3.5 rounded-lg border border-slate-200 bg-slate-50 flex items-start gap-3">
+                    {selectedResident.photoUrl ? (
+                      <img
+                        src={selectedResident.photoUrl}
+                        alt={`${selectedResident.firstName} ${selectedResident.lastName}`}
+                        referrerPolicy="no-referrer"
+                        className="w-11 h-11 rounded-full object-cover border border-slate-200 bg-white shrink-0"
+                      />
+                    ) : (
+                      <div className="w-11 h-11 rounded-full border border-slate-200 bg-white text-slate-600 text-xs font-semibold flex items-center justify-center shrink-0">
+                        {`${selectedResident.firstName.charAt(0)}${selectedResident.lastName.charAt(0)}`.toUpperCase()}
+                      </div>
+                    )}
+                    <div className="min-w-0 flex-1 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                      <div className="sm:col-span-2 flex items-center justify-between gap-2">
+                        <span className="font-semibold text-slate-900 truncate">
+                          {selectedResident.lastName}, {selectedResident.firstName}{' '}
+                          {selectedResident.middleName} {selectedResident.suffix}
+                        </span>
+                        <span className="font-mono-num text-slate-500 shrink-0">
+                          {selectedResident.code}
+                        </span>
+                      </div>
+                      <div className="text-slate-600">
+                        <span className="text-slate-400">Sex / Age:</span> {selectedResident.sex},{' '}
+                        <span className="font-mono-num">{selectedResident.age} yrs</span> ·{' '}
+                        {selectedResident.civilStatus}
+                      </div>
+                      <div className="text-slate-600">
+                        <span className="text-slate-400">Contact:</span>{' '}
+                        <span className="font-mono-num">
+                          {selectedResident.contactNumber || 'N/A'}
+                        </span>
+                      </div>
+                      <div className="sm:col-span-2 text-slate-600 truncate">
+                        <span className="text-slate-400">Address:</span> {selectedResident.purok} —{' '}
+                        {selectedResident.completeAddress}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -662,15 +731,34 @@ export function TransactionsPage({
 
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Applicable Fee
+                    Fee &amp; Printing Eligibility
                   </label>
-                  <div className="px-3 py-2 text-sm border border-slate-200 rounded-lg bg-slate-50 font-mono-num text-slate-800">
+                  <div
+                    className={`px-3 py-2 text-xs border rounded-lg font-medium ${
+                      !selectedTemplate?.requiresPayment ||
+                      selectedTemplate.defaultFee === 0 ||
+                      extraFields.isFTJS ||
+                      isBypass
+                        ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                        : 'border-amber-200 bg-amber-50 text-amber-800'
+                    }`}
+                  >
                     {!selectedTemplate?.requiresPayment ||
                     selectedTemplate.defaultFee === 0 ||
                     extraFields.isFTJS ||
-                    isBypass
-                      ? 'PHP 0.00 (Waived)'
-                      : formatCurrencyPHP(selectedTemplate.defaultFee)}
+                    isBypass ? (
+                      <>
+                        <span className="font-mono-num font-semibold">PHP 0.00</span> — Free (Can
+                        print immediately)
+                      </>
+                    ) : (
+                      <>
+                        <span className="font-mono-num font-semibold">
+                          {formatCurrencyPHP(selectedTemplate.defaultFee)}
+                        </span>{' '}
+                        — Payment Required at Treasury
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1091,11 +1179,17 @@ export function TransactionsPage({
                   >
                     Proceed to Payment Counter
                   </button>
+                ) : user.role !== 'Treasurer' &&
+                  detailTxn.status !== 'Cancelled' &&
+                  !canPrintTransaction(detailTxn) ? (
+                  <p className="text-xs font-medium text-amber-700">
+                    Awaiting payment settlement at the Barangay Treasury before printing.
+                  </p>
                 ) : (
                   <div />
                 )}
 
-                {user.role !== 'Treasurer' && detailTxn.status !== 'Cancelled' && (
+                {user.role !== 'Treasurer' && canPrintTransaction(detailTxn) && (
                   <button
                     type="button"
                     onClick={() => {
@@ -1104,8 +1198,8 @@ export function TransactionsPage({
                     }}
                     className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-blue-800 hover:bg-blue-900 rounded-lg"
                   >
-                    <FileText className="w-4 h-4" />
-                    Generate &amp; Print Document
+                    <Printer className="w-4 h-4" />
+                    Print Document
                   </button>
                 )}
               </div>
