@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS `staff_officials` (
   `contact_number` VARCHAR(30) NOT NULL DEFAULT '',
   `term_start` VARCHAR(20) NOT NULL DEFAULT '',
   `term_end` VARCHAR(20) NOT NULL DEFAULT '',
+  `photo_url` VARCHAR(255) NOT NULL DEFAULT '',
   `status` VARCHAR(20) NOT NULL DEFAULT 'Active'
 ) ENGINE=InnoDB;
 

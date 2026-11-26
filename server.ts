@@ -12,8 +12,11 @@ import {
 } from './server/auth.ts';
 import type {TokenPayload} from './server/auth.ts';
 import {
+  deleteOfficialPhotoByUrl,
   deleteResidentPhotoByUrl,
+  resolveSafeOfficialPhotoPath,
   resolveSafePhotoPath,
+  saveOfficialPhotoFromDataUrl,
   saveResidentPhotoFromDataUrl,
 } from './server/photos.ts';
 import {
@@ -1388,6 +1391,17 @@ async function createApp() {
 
   // ---------------- STAFF & OFFICIALS + ORG CHART ----------------
 
+  app.get('/api/staff/photos/:filename', requireAuth, (req, res) => {
+    const filename = cleanStr(String(req.params.filename || ''), 120);
+    const safePath = resolveSafeOfficialPhotoPath(filename);
+    if (!safePath) {
+      res.status(404).json({error: 'Official photo not found.'});
+      return;
+    }
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.sendFile(safePath);
+  });
+
   app.get('/api/staff', requireAuth, (_req, res) => {
     const db = loadDatabase();
     res.json({staffOfficials: db.staffOfficials});
@@ -1403,9 +1417,21 @@ async function createApp() {
     }
 
     const db = loadDatabase();
+    const code = generateSequentialCode('OFF', db.staffOfficials.map((s) => s.code));
+
+    let photoUrl = '';
+    if (typeof req.body?.photoDataUrl === 'string' && req.body.photoDataUrl.trim()) {
+      try {
+        photoUrl = saveOfficialPhotoFromDataUrl(code, req.body.photoDataUrl.trim());
+      } catch (err) {
+        res.status(400).json({error: err instanceof Error ? err.message : 'Invalid official photo.'});
+        return;
+      }
+    }
+
     const record: StaffOfficialRecord = {
       id: `off-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
-      code: generateSequentialCode('OFF', db.staffOfficials.map((s) => s.code)),
+      code,
       resCode: cleanStr(req.body?.resCode, 40),
       fullName,
       position,
@@ -1415,6 +1441,7 @@ async function createApp() {
       contactNumber: cleanStr(req.body?.contactNumber, 30),
       termStart: cleanStr(req.body?.termStart, 20),
       termEnd: cleanStr(req.body?.termEnd, 20),
+      photoUrl,
       status: req.body?.status === 'Inactive' ? 'Inactive' : 'Active',
     };
 
@@ -1443,6 +1470,21 @@ async function createApp() {
       ? (Number(req.body.tier) as 1 | 2 | 3)
       : current.tier;
 
+    let nextPhotoUrl = current.photoUrl || '';
+    if (req.body?.removePhoto === true) {
+      deleteOfficialPhotoByUrl(current.photoUrl);
+      nextPhotoUrl = '';
+    } else if (typeof req.body?.photoDataUrl === 'string' && req.body.photoDataUrl.trim()) {
+      try {
+        const savedUrl = saveOfficialPhotoFromDataUrl(current.code, req.body.photoDataUrl.trim());
+        deleteOfficialPhotoByUrl(current.photoUrl);
+        nextPhotoUrl = savedUrl;
+      } catch (err) {
+        res.status(400).json({error: err instanceof Error ? err.message : 'Invalid official photo.'});
+        return;
+      }
+    }
+
     db.staffOfficials[idx] = {
       ...current,
       fullName: req.body?.fullName ? cleanStr(req.body.fullName, 120) : current.fullName,
@@ -1455,6 +1497,7 @@ async function createApp() {
       termStart: req.body?.termStart !== undefined ? cleanStr(req.body.termStart, 20) : current.termStart,
       termEnd: req.body?.termEnd !== undefined ? cleanStr(req.body.termEnd, 20) : current.termEnd,
       resCode: req.body?.resCode !== undefined ? cleanStr(req.body.resCode, 40) : current.resCode,
+      photoUrl: nextPhotoUrl,
       status:
         req.body?.status === 'Inactive' || req.body?.status === 'Active' ? req.body.status : current.status,
     };
@@ -1478,6 +1521,7 @@ async function createApp() {
       return;
     }
     const removed = db.staffOfficials[idx];
+    deleteOfficialPhotoByUrl(removed.photoUrl);
     db.staffOfficials.splice(idx, 1);
     appendActivityLog(
       db,

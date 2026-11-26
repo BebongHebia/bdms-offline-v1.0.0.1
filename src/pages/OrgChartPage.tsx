@@ -8,6 +8,63 @@ interface OrgChartPageProps {
   token: string;
 }
 
+function getInitials(name: string): string {
+  const cleaned = name
+    .replace(/^Hon\.\s+/i, '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (cleaned.length === 0) return 'OF';
+  if (cleaned.length === 1) return cleaned[0].slice(0, 2).toUpperCase();
+  return `${cleaned[0].charAt(0)}${cleaned[cleaned.length - 1].charAt(0)}`.toUpperCase();
+}
+
+function OrgAvatar({
+  fullName,
+  photoUrl,
+  size = 'md',
+  dark = false,
+}: {
+  fullName: string;
+  photoUrl?: string;
+  size?: 'md' | 'lg';
+  dark?: boolean;
+}) {
+  const [imgFailed, setImgFailed] = useState(false);
+  const dims = size === 'lg' ? 'w-16 h-16 text-base' : 'w-11 h-11 text-xs';
+
+  useEffect(() => {
+    setImgFailed(false);
+  }, [photoUrl]);
+
+  if (photoUrl && !imgFailed) {
+    return (
+      <img
+        src={photoUrl}
+        alt={fullName}
+        referrerPolicy="no-referrer"
+        onError={() => setImgFailed(true)}
+        className={`${dims} rounded-full object-cover border ${
+          dark ? 'border-blue-400/50 bg-slate-800' : 'border-slate-200 bg-slate-100'
+        } shrink-0`}
+      />
+    );
+  }
+
+  return (
+    <div
+      aria-label={`${fullName} initials`}
+      className={`${dims} rounded-full border font-semibold flex items-center justify-center shrink-0 ${
+        dark
+          ? 'border-blue-400/40 bg-slate-800 text-blue-100'
+          : 'border-slate-200 bg-slate-100 text-slate-600'
+      }`}
+    >
+      {getInitials(fullName)}
+    </div>
+  );
+}
+
 export function OrgChartPage({token}: OrgChartPageProps) {
   const [officials, setOfficials] = useState<StaffOfficialRecord[]>([]);
   const [settings, setSettings] = useState<BarangaySettings | null>(null);
@@ -105,10 +162,11 @@ export function OrgChartPage({token}: OrgChartPageProps) {
                     key={o.id}
                     type="button"
                     onClick={() => setSelected(o)}
-                    className="w-72 text-center border-2 border-blue-900 bg-slate-900 text-white rounded-xl p-4 hover:bg-slate-800 transition-colors"
+                    className="w-72 text-center border-2 border-blue-900 bg-slate-900 text-white rounded-xl p-4 hover:bg-slate-800 transition-colors flex flex-col items-center"
                   >
-                    <p className="text-xs text-blue-200 font-medium">{o.position}</p>
-                    <p className="text-base font-bold mt-1">{o.fullName}</p>
+                    <OrgAvatar fullName={o.fullName} photoUrl={o.photoUrl} size="lg" dark />
+                    <p className="text-xs text-blue-200 font-medium mt-2.5">{o.position}</p>
+                    <p className="text-base font-bold mt-0.5">{o.fullName}</p>
                     {o.committee && <p className="text-xs text-slate-300 mt-1">{o.committee}</p>}
                   </button>
                 ))}
@@ -128,16 +186,19 @@ export function OrgChartPage({token}: OrgChartPageProps) {
                       key={o.id}
                       type="button"
                       onClick={() => setSelected(o)}
-                      className="text-left border border-slate-200 bg-slate-50 hover:border-blue-800 hover:bg-white rounded-xl p-4 transition-colors"
+                      className="text-left border border-slate-200 bg-slate-50 hover:border-blue-800 hover:bg-white rounded-xl p-4 transition-colors flex items-start gap-3"
                     >
-                      <div className="flex items-center justify-between text-xs text-slate-500">
-                        <span className="font-medium text-blue-800">{o.position}</span>
-                        <span className="font-mono-num">{o.code}</span>
+                      <OrgAvatar fullName={o.fullName} photoUrl={o.photoUrl} size="md" />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between text-xs text-slate-500 gap-2">
+                          <span className="font-medium text-blue-800 truncate">{o.position}</span>
+                          <span className="font-mono-num shrink-0">{o.code}</span>
+                        </div>
+                        <p className="text-sm font-bold text-slate-900 mt-1 truncate">{o.fullName}</p>
+                        {o.committee && (
+                          <p className="text-xs text-slate-600 mt-1 line-clamp-2">{o.committee}</p>
+                        )}
                       </div>
-                      <p className="text-sm font-bold text-slate-900 mt-1">{o.fullName}</p>
-                      {o.committee && (
-                        <p className="text-xs text-slate-600 mt-1 line-clamp-2">{o.committee}</p>
-                      )}
                     </button>
                   ))}
                 </div>
@@ -158,18 +219,23 @@ export function OrgChartPage({token}: OrgChartPageProps) {
                         key={o.id}
                         type="button"
                         onClick={() => setSelected(o)}
-                        className="text-left border border-slate-200 bg-white hover:border-blue-800 rounded-xl p-4 transition-colors"
+                        className="text-left border border-slate-200 bg-white hover:border-blue-800 rounded-xl p-4 transition-colors flex items-start gap-3"
                       >
-                        <div className="flex items-center justify-between text-xs text-slate-500">
-                          <span className="font-medium text-slate-700">{o.position}</span>
-                          <span className="font-mono-num">{o.code}</span>
-                        </div>
-                        <p className="text-sm font-semibold text-slate-900 mt-1">{o.fullName}</p>
-                        {supervisor && (
-                          <p className="text-[11px] text-slate-500 mt-1.5">
-                            Reports to: {supervisor.fullName}
+                        <OrgAvatar fullName={o.fullName} photoUrl={o.photoUrl} size="md" />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between text-xs text-slate-500 gap-2">
+                            <span className="font-medium text-slate-700 truncate">{o.position}</span>
+                            <span className="font-mono-num shrink-0">{o.code}</span>
+                          </div>
+                          <p className="text-sm font-semibold text-slate-900 mt-1 truncate">
+                            {o.fullName}
                           </p>
-                        )}
+                          {supervisor && (
+                            <p className="text-[11px] text-slate-500 mt-1.5 truncate">
+                              Reports to: {supervisor.fullName}
+                            </p>
+                          )}
+                        </div>
                       </button>
                     );
                   })}
@@ -183,17 +249,20 @@ export function OrgChartPage({token}: OrgChartPageProps) {
       {/* Selected Official Detail Bar */}
       {selected && (
         <div className="no-print bg-white border border-slate-200 rounded-xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <p className="text-xs text-slate-500 font-mono-num">
-              {selected.code} · Tier {selected.tier}
-            </p>
-            <h4 className="text-base font-bold text-slate-900">
-              {selected.fullName} — {selected.position}
-            </h4>
-            <p className="text-xs text-slate-600 mt-0.5">
-              Committee: {selected.committee || 'General'} · Contact:{' '}
-              {selected.contactNumber || 'N/A'} · Term: {selected.termStart} to {selected.termEnd}
-            </p>
+          <div className="flex items-center gap-4">
+            <OrgAvatar fullName={selected.fullName} photoUrl={selected.photoUrl} size="lg" />
+            <div>
+              <p className="text-xs text-slate-500 font-mono-num">
+                {selected.code} · Tier {selected.tier}
+              </p>
+              <h4 className="text-base font-bold text-slate-900">
+                {selected.fullName} — {selected.position}
+              </h4>
+              <p className="text-xs text-slate-600 mt-0.5">
+                Committee: {selected.committee || 'General'} · Contact:{' '}
+                {selected.contactNumber || 'N/A'} · Term: {selected.termStart} to {selected.termEnd}
+              </p>
+            </div>
           </div>
           <button
             type="button"

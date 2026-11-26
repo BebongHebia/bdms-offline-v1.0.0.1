@@ -131,6 +131,7 @@ export interface StaffOfficialRecord {
   contactNumber: string;
   termStart: string;
   termEnd: string;
+  photoUrl?: string;
   status: 'Active' | 'Inactive';
 }
 

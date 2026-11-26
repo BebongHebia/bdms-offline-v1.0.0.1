@@ -192,9 +192,12 @@ export async function initMysqlDatabase(fallbackJsonDb?: BdmsDatabase): Promise<
         contact_number VARCHAR(30) NOT NULL DEFAULT '',
         term_start VARCHAR(20) NOT NULL DEFAULT '',
         term_end VARCHAR(20) NOT NULL DEFAULT '',
+        photo_url VARCHAR(255) NOT NULL DEFAULT '',
         status VARCHAR(20) NOT NULL DEFAULT 'Active'
       ) ENGINE=InnoDB
     `);
+
+    await ensureColumn(pool, cfg.database, 'staff_officials', 'photo_url', "VARCHAR(255) NOT NULL DEFAULT ''");
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS document_templates (
@@ -406,6 +409,7 @@ export async function loadMysqlDatabase(): Promise<BdmsDatabase> {
     contactNumber: String(r.contact_number || ''),
     termStart: String(r.term_start || ''),
     termEnd: String(r.term_end || ''),
+    photoUrl: String(r.photo_url || ''),
     status: r.status as StaffOfficialRecord['status'],
   }));
 
@@ -594,8 +598,8 @@ export async function saveMysqlDatabase(db: BdmsDatabase): Promise<void> {
       await conn.query(
         `INSERT INTO staff_officials (
           id, code, res_code, full_name, position, tier, committee, reports_to,
-          contact_number, term_start, term_end, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          contact_number, term_start, term_end, photo_url, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           s.id,
           s.code,
@@ -608,6 +612,7 @@ export async function saveMysqlDatabase(db: BdmsDatabase): Promise<void> {
           s.contactNumber || '',
           s.termStart || '',
           s.termEnd || '',
+          s.photoUrl || '',
           s.status,
         ],
       );

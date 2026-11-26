@@ -554,6 +554,30 @@
   },
   "activityLogs": [
     {
+      "id": "log-1795663880737-ho6i",
+      "timestamp": "2026-11-26T03:31:20.737Z",
+      "actor": "Barangay Ocho Administrator",
+      "role": "Admin",
+      "action": "Official Removed",
+      "details": "Removed Test Official (OFF-2026-0010)"
+    },
+    {
+      "id": "log-1795663880585-no2o",
+      "timestamp": "2026-11-26T03:31:20.585Z",
+      "actor": "Barangay Ocho Administrator",
+      "role": "Admin",
+      "action": "Official Added",
+      "details": "Added Test Official — Barangay Kagawad"
+    },
+    {
+      "id": "log-1795663880562-scfd",
+      "timestamp": "2026-11-26T03:31:20.562Z",
+      "actor": "Barangay Ocho Administrator",
+      "role": "Admin",
+      "action": "User Login",
+      "details": "Signed in as Admin"
+    },
+    {
       "id": "log-1795620274714-r3n8",
       "timestamp": "2026-11-25T15:24:34.714Z",
       "actor": "Barangay Ocho Administrator",
